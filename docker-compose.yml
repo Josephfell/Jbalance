@@ -1,0 +1,36 @@
+services:
+  controlplane:
+    build:
+      context: .
+      dockerfile: cmd/controlplane/Dockerfile
+    ports:
+      - "${LB_GRPC_PORT:-9090}:9090"
+      - "${LB_ADMIN_PORT:-9091}:9091"
+    env_file:
+      - .env
+    volumes:
+      # Persists the admin password hash + session secret across container
+      # restarts. Without this volume, a fresh random password is
+      # generated (and printed to logs) every time the container starts.
+      - controlplane-admin-data:/var/lib/go-loadbalancer
+    restart: unless-stopped
+
+  dataplane:
+    build:
+      context: .
+      dockerfile: cmd/dataplane/Dockerfile
+    ports:
+      - "${LB_HTTP_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      # Inside the Compose network, the control plane is reachable by
+      # service name rather than localhost — override here so .env can
+      # still describe the non-Docker/bare-metal case accurately.
+      LB_CONTROL_PLANE_ADDR: controlplane:9090
+    depends_on:
+      - controlplane
+    restart: unless-stopped
+
+volumes:
+  controlplane-admin-data:

@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package controlplane;
+
+option go_package = "github.com/josephfell/go-loadbalancer/proto";
+
+// ControlPlane is implemented by the control plane and consumed by data
+// plane proxy instances. A data plane connects once and receives a stream
+// of backend list updates for its group — no polling.
+service ControlPlane {
+  // StreamBackends opens a long-lived stream. The data plane sends its
+  // group name once (in the initial request), and receives a new
+  // BackendSet every time the control plane's reconciliation loop detects
+  // a change for that group.
+  rpc StreamBackends(StreamBackendsRequest) returns (stream BackendSet);
+
+  // ReportHealth is called periodically by a data plane instance to report
+  // the current health (as determined by its own local health checker) of
+  // every backend it knows about for a group. The control plane has no
+  // visibility into backend health on its own — this is how that
+  // information flows back, so it can be surfaced in the admin web UI.
+  rpc ReportHealth(HealthReport) returns (HealthReportAck);
+}
+
+message StreamBackendsRequest {
+  // The backend pool group this data plane instance serves traffic for,
+  // e.g. "web-tier" or "api-tier". Lets one control plane serve multiple
+  // independent proxy fleets.
+  string group = 1;
+  // Human-readable identifier for the connecting data plane instance,
+  // used only for control plane logging/observability.
+  string instance_id = 2;
+}
+
+message Backend {
+  string address = 1; // host:port
+  // Relative capacity weight for weighted load balancing. Defaults to 1
+  // when unset/zero.
+  int32 weight = 2;
+}
+
+message BackendSet {
+  string group = 1;
+  repeated Backend backends = 2;
+  // Monotonically increasing version number for this group's backend set.
+  // Lets the data plane detect and ignore stale/out-of-order updates.
+  int64 version = 3;
+  // Load-balancing algorithm the data plane should use to select among
+  // these backends: "round_robin" (default, weighted), "least_connections"
+  // (weighted by outstanding request count), or "random" (weighted).
+  // Unset/unrecognised values fall back to round_robin.
+  string algorithm = 4;
+}
+
+message BackendHealth {
+  string address = 1; // host:port, matches Backend.address
+  bool healthy = 2;
+}
+
+message HealthReport {
+  string group = 1;
+  string instance_id = 2; // which data plane instance this report is from
+  repeated BackendHealth backends = 3;
+}
+
+message HealthReportAck {}
