@@ -3,105 +3,241 @@ package admin
 // templatesSource holds every admin UI page as Go html/template blocks.
 // Kept as a single Go string (rather than embedded files) to avoid adding
 // a build-time asset pipeline for what is intentionally a small, plain
-// server-rendered UI.
+// server-rendered UI — no JS framework, no external fonts/icons/CDNs, so
+// the admin UI keeps working with no network access beyond the browser
+// talking to this server.
 //
-// Each top-level page template (login/dashboard/password) begins with the
-// shared HTML shell inline and includes the relevant body block — Go's
-// html/template doesn't support "extends"-style inheritance, so the shell
-// is duplicated per page rather than faked with a fragile workaround.
+// Visual design follows the "jbalance console" mockup (dark, indigo
+// accent, sidebar nav) but only surfaces data the control plane actually
+// tracks — the mockup's Routes/TLS/Config screens depict features that
+// don't exist yet in this codebase and are intentionally not included
+// here (see the roadmap discussion for what it would take to add them).
+//
+// Each top-level page template (login/dashboard/fleet/audit/password)
+// begins with the shared HTML shell inline and includes the "style" and
+// "sidebar" blocks — Go's html/template doesn't support "extends"-style
+// inheritance, so the shell is duplicated per page rather than faked with
+// a fragile workaround.
 const templatesSource = `
 {{define "style"}}
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: dark;
+    --bg: #14151f;
+    --surface: #1b1d2b;
+    --surface-soft: color-mix(in srgb, #1b1d2b 55%, transparent);
+    --border: #2a2d3f;
+    --border-soft: color-mix(in srgb, #2a2d3f 65%, transparent);
+    --text: #e7e7ee;
+    --text-muted: #9195ab;
+    --text-faint: #6b6f85;
+    --accent: #9184d9;
+    --accent-weak: color-mix(in srgb, #9184d9 14%, transparent);
+    --accent-weaker: color-mix(in srgb, #9184d9 8%, transparent);
+    --ok: #4ade80;
+    --warn: #facc15;
+    --down: #f87171;
+    --unknown: #6b6f85;
+    --radius: 8px;
+    --radius-sm: 5px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #0f1115; color: #e4e6eb; margin: 0; padding: 0;
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text); font-size: 13.5px; line-height: 1.5;
   }
-  .bar {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 24px; background: #161922; border-bottom: 1px solid #262b36;
+  a { color: var(--accent); text-decoration: none; }
+  h1, h2, h3 { font-weight: 600; letter-spacing: -0.01em; margin: 0; }
+
+  .app { display: flex; min-height: 100vh; }
+
+  /* — sidebar — */
+  .sidebar {
+    width: 208px; flex: none; display: flex; flex-direction: column;
+    border-right: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 55%, var(--bg));
+    padding: 16px 0;
   }
-  .bar a { color: #e4e6eb; text-decoration: none; font-weight: 600; }
-  .bar nav a { color: #9aa3b2; margin-left: 16px; font-weight: 400; font-size: 14px; }
-  .bar nav a:hover { color: #e4e6eb; }
-  main { max-width: 720px; margin: 0 auto; padding: 32px 24px; }
-  .center { display: flex; align-items: center; justify-content: center; min-height: 90vh; }
+  .brand { display: flex; align-items: center; gap: 9px; padding: 0 16px 16px; }
+  .brand-mark {
+    width: 24px; height: 24px; border-radius: 7px; border: 1px solid var(--accent);
+    display: flex; align-items: center; justify-content: center; flex: none; color: var(--accent);
+  }
+  .brand-name { font-weight: 600; font-size: 14.5px; letter-spacing: -0.01em; }
+  .brand-sub { font-size: 10px; color: var(--text-faint); letter-spacing: .06em; text-transform: uppercase; }
+  .side-nav { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px; }
+  .side-nav a {
+    display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: var(--radius-sm);
+    color: var(--text-muted); font-size: 13px; font-weight: 500; border: 1px solid transparent;
+  }
+  .side-nav a svg { flex: none; width: 15px; height: 15px; }
+  .side-nav a:hover { background: color-mix(in srgb, var(--text) 6%, transparent); color: var(--text); }
+  .side-nav a.active {
+    color: var(--accent); background: var(--accent-weak);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .side-foot {
+    margin-top: auto; padding: 14px 16px 0; border-top: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .side-foot .status { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--text-muted); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; display: inline-block; }
+  .dot--ok { background: var(--ok); animation: pulse 2.2s ease-in-out infinite; }
+  .dot--down { background: var(--down); }
+  .dot--unknown { background: var(--unknown); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+  .side-foot form { margin: 0; }
+  .signout-btn {
+    width: 100%; text-align: left; padding: 8px 10px; border-radius: var(--radius-sm);
+    border: 1px solid transparent; background: transparent; color: var(--text-muted);
+    font: 500 13px inherit; cursor: pointer; display: flex; align-items: center; gap: 9px;
+  }
+  .signout-btn:hover { background: color-mix(in srgb, var(--down) 10%, transparent); color: var(--down); }
+  .signout-btn svg { width: 15px; height: 15px; flex: none; }
+
+  /* — main / header — */
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .topbar {
+    height: 54px; flex: none; display: flex; align-items: baseline; gap: 10px;
+    padding: 0 22px; border-bottom: 1px solid var(--border);
+  }
+  .topbar h1 { font-size: 15.5px; }
+  .topbar .sub { font-size: 11.5px; color: var(--text-faint); }
+  .topbar .right { margin-left: auto; display: flex; align-items: center; gap: 8px; align-self: center; }
+  .clock-pill {
+    display: flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border);
+    border-radius: var(--radius); font-size: 11px; color: var(--text-muted); font-family: var(--mono);
+  }
+  .content { flex: 1; padding: 20px 22px 30px; display: flex; flex-direction: column; gap: 14px; overflow: auto; }
+  .refresh-note { font-size: 11px; color: var(--text-faint); margin: -4px 0 0; }
+
+  /* — cards / sections — */
   .card {
-    background: #161922; border: 1px solid #262b36; border-radius: 10px;
-    padding: 28px; width: 100%; max-width: 380px;
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-soft);
   }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  h2 { font-size: 15px; color: #9aa3b2; margin: 0 0 20px; font-weight: 400; }
-  label { display: block; font-size: 13px; color: #9aa3b2; margin-bottom: 6px; }
-  input[type=password], input[type=text] {
-    width: 100%; box-sizing: border-box; padding: 10px 12px; margin-bottom: 16px;
-    background: #0f1115; border: 1px solid #2c3140; border-radius: 6px;
-    color: #e4e6eb; font-size: 14px;
+  .card-head {
+    display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--border);
   }
-  button {
-    width: 100%; padding: 11px; background: #3b82f6; border: none; border-radius: 6px;
-    color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+  .card-head h2 { font-size: 13px; }
+  .card-head .meta { font-size: 11px; color: var(--text-faint); }
+  .card-pad { padding: 14px; }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .stat {
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 11px 13px;
+    background: var(--surface-soft); display: flex; flex-direction: column; gap: 5px;
   }
-  button:hover { background: #2f6fdb; }
-  .error { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35);
-    color: #f87171; padding: 10px 12px; border-radius: 6px; font-size: 13px; margin-bottom: 16px; }
-  .success { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.35);
-    color: #4ade80; padding: 10px 12px; border-radius: 6px; font-size: 13px; margin-bottom: 16px; }
-  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #262b36; font-size: 13px; }
-  th { color: #9aa3b2; font-weight: 500; }
-  .group-card { background: #161922; border: 1px solid #262b36; border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
-  .group-title { font-weight: 600; font-size: 15px; margin-bottom: 2px; }
-  .group-meta { color: #9aa3b2; font-size: 12px; margin-bottom: 10px; }
-  .empty { color: #9aa3b2; font-size: 14px; text-align: center; padding: 40px 0; }
-  .logout-form { margin: 0; }
-  .logout-form button { width: auto; padding: 6px 12px; font-size: 13px; background: #262b36; }
-  .logout-form button:hover { background: #323847; }
-  .health-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
-  .health-dot--healthy { background: #4ade80; }
-  .health-dot--unhealthy { background: #f87171; }
-  .health-dot--unknown { background: #4b5262; }
-  .health-label { font-size: 12px; color: #9aa3b2; }
-  .refresh-note { color: #565f70; font-size: 11px; margin-bottom: 16px; }
-  .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #262b36; color: #9aa3b2; }
-  .badge--fail { background: rgba(239,68,68,0.15); color: #f87171; }
-  .badge--ok { background: rgba(34,197,94,0.15); color: #4ade80; }
-  .audit-row td { font-size: 12px; }
-  .audit-time { color: #565f70; white-space: nowrap; }
-  .algo-form { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
-  .algo-form select { background: #0f1115; border: 1px solid #2c3140; border-radius: 6px; color: #e4e6eb;
-    font-size: 13px; padding: 6px 8px; }
-  .algo-form button { width: auto; padding: 6px 12px; font-size: 13px; }
+  .stat-label { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint); }
+  .stat-value { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
+  .stat-note { font-size: 11px; color: var(--text-muted); }
+
+  /* — tables — */
+  .table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .table th {
+    text-align: left; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-faint); font-weight: 500; padding: 8px 14px; border-bottom: 1px solid var(--border);
+  }
+  .table td { padding: 9px 14px; border-top: 1px solid var(--border-soft); vertical-align: middle; }
+  .table tr:hover td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+  .table .mono { font-family: var(--mono); font-size: 12.5px; }
+  .table .muted { color: var(--text-faint); font-size: 11.5px; }
+  .drained-row td { opacity: .5; }
+
+  /* — pills / tags — */
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2px 9px;
+    border-radius: 10px; border: 1px solid transparent; line-height: 1.6;
+  }
+  .pill--ok { color: var(--ok); border-color: var(--ok); }
+  .pill--down { color: var(--down); border-color: var(--down); }
+  .pill--unknown { color: var(--unknown); border-color: var(--unknown); }
+  .tag { font-size: 10.5px; margin-left: 6px; padding: 1px 7px; border-radius: 8px; }
+  .tag--drained { color: var(--down); border: 1px solid color-mix(in srgb, var(--down) 55%, transparent); }
+  .tag--override { color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); }
+
+  /* — forms / buttons — */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer;
+    font: 500 12.5px inherit; padding: 6px 12px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: transparent; color: var(--text);
+  }
+  .btn:hover { border-color: var(--text-muted); }
+  .btn-primary { border-color: var(--accent); color: var(--accent); }
+  .btn-primary:hover { background: var(--accent-weak); }
+  .btn-danger { border-color: color-mix(in srgb, var(--down) 55%, transparent); color: var(--down); }
+  .btn-danger:hover { background: color-mix(in srgb, var(--down) 12%, transparent); }
+  .btn-full { width: 100%; padding: 10px; font-size: 13.5px; }
+  .btn[disabled] { opacity: .45; cursor: not-allowed; }
   .row-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .row-actions form { display: inline-flex; align-items: center; gap: 4px; margin: 0; }
-  .row-actions input[type=number] {
-    width: 60px; box-sizing: border-box; padding: 5px 6px; margin: 0;
-    background: #0f1115; border: 1px solid #2c3140; border-radius: 6px; color: #e4e6eb; font-size: 12px;
+  input[type=password], input[type=text], input[type=number], select {
+    font: inherit; font-size: 13px; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px 9px;
   }
-  .row-actions button {
-    width: auto; padding: 5px 10px; font-size: 12px; background: #262b36;
+  input:hover, select:hover { border-color: var(--text-muted); }
+  input:focus-visible, select:focus-visible { outline: 1.5px solid var(--accent); outline-offset: 0; }
+  .weight-input { width: 56px; padding: 5px 7px; font-size: 12px; }
+  .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+  .field label { font-size: 11.5px; color: var(--text-muted); }
+  .algo-select { font-size: 12.5px; padding: 6px 8px; }
+
+  .error {
+    background: color-mix(in srgb, var(--down) 12%, transparent); border: 1px solid color-mix(in srgb, var(--down) 35%, transparent);
+    color: var(--down); padding: 10px 12px; border-radius: var(--radius); font-size: 13px; margin-bottom: 14px;
   }
-  .row-actions button:hover { background: #323847; }
-  .row-actions button.danger { background: rgba(239,68,68,0.15); color: #f87171; }
-  .row-actions button.danger:hover { background: rgba(239,68,68,0.28); }
-  .drained-row { opacity: 0.55; }
-  .tag-drained { font-size: 11px; color: #f87171; margin-left: 6px; }
-  .tag-override { font-size: 11px; color: #60a5fa; margin-left: 6px; }
+  .success {
+    background: color-mix(in srgb, var(--ok) 12%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+    color: var(--ok); padding: 10px 12px; border-radius: var(--radius); font-size: 13px; margin-bottom: 14px;
+  }
+  .empty { color: var(--text-faint); font-size: 13.5px; text-align: center; padding: 46px 0; }
+
+  /* — login — */
+  .center-page { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
+  .login-card { width: 100%; max-width: 380px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 30px; }
+  .login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+  .login-title { font-size: 19px; margin-bottom: 3px; }
+  .login-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 20px; }
 </style>
 {{end}}
 
-{{define "nav"}}
-<div class="bar">
-  <a href="/">Go Load Balancer</a>
-  <nav style="display:flex; align-items:center;">
-    <a href="/">Dashboard</a>
-    <a href="/audit">Audit Log</a>
-    <a href="/password">Change Password</a>
-    <form class="logout-form" method="post" action="/logout" style="margin-left:16px;">
-      <button type="submit">Sign out</button>
-    </form>
+{{define "sidebar"}}
+<aside class="sidebar">
+  <div class="brand">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" width="14" height="14"><path d="M4 7h6l2 2h8M4 17h6l2-2h8M17 4l3 3-3 3M17 14l3 3-3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div>
+      <div class="brand-name">jbalance</div>
+      <div class="brand-sub">control plane</div>
+    </div>
+  </div>
+  <nav class="side-nav">
+    <a href="/" {{if eq .Active "dashboard"}}class="active"{{end}}>
+      <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="13" y="3" width="8" height="5" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="13" y="10" width="8" height="11" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="13" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.6"/></svg>
+      <span>Dashboard</span>
+    </a>
+    <a href="/fleet" {{if eq .Active "fleet"}}class="active"{{end}}>
+      <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="5" rx="1.3" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="10.5" width="18" height="5" rx="1.3" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="17" width="18" height="4" rx="1.3" stroke="currentColor" stroke-width="1.6"/></svg>
+      <span>Fleet</span>
+    </a>
+    <a href="/audit" {{if eq .Active "audit"}}class="active"{{end}}>
+      <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.6"/><path d="M12 7.5V12l3 2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <span>Audit Log</span>
+    </a>
+    <a href="/password" {{if eq .Active "password"}}class="active"{{end}}>
+      <svg viewBox="0 0 24 24" fill="none"><circle cx="8" cy="15" r="4" stroke="currentColor" stroke-width="1.6"/><path d="M11.2 12 19 4.2M15.5 7.7l2.3 2.3M18 5.2l2.3 2.3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <span>Change Password</span>
+    </a>
   </nav>
-</div>
+  <div class="side-foot">
+    <div class="status"><span class="dot dot--ok"></span>control plane process running</div>
+    <form method="post" action="/logout">
+      <button type="submit" class="signout-btn">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M15 4H8a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10 12h11m0 0-3-3m3 3-3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Sign out
+      </button>
+    </form>
+  </div>
+</aside>
 {{end}}
 
 {{define "login"}}
@@ -110,20 +246,28 @@ const templatesSource = `
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign in — Go Load Balancer</title>
+  <title>Sign in — jbalance</title>
   {{template "style"}}
 </head>
 <body>
-  <div class="center">
-    <div class="card">
-      <h1>Sign in</h1>
-      <h2>Go Load Balancer — control plane admin</h2>
+  <div class="center-page">
+    <div class="login-card">
+      <div class="login-brand">
+        <div class="brand-mark">
+          <svg viewBox="0 0 24 24" fill="none" width="14" height="14"><path d="M4 7h6l2 2h8M4 17h6l2-2h8M17 4l3 3-3 3M17 14l3 3-3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <div class="brand-name">jbalance</div>
+      </div>
+      <div class="login-title">Sign in</div>
+      <div class="login-sub">Control plane admin console</div>
       {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
       <form method="post" action="/login">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <label for="password">Password</label>
-        <input type="password" id="password" name="password" autofocus required>
-        <button type="submit">Sign in</button>
+        <div class="field">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" autofocus required>
+        </div>
+        <button type="submit" class="btn btn-primary btn-full">Sign in</button>
       </form>
     </div>
   </div>
@@ -137,109 +281,183 @@ const templatesSource = `
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Dashboard — Go Load Balancer</title>
+  <title>Dashboard — jbalance</title>
   {{template "style"}}
 </head>
 <body>
-  {{template "nav"}}
-  <main>
-    <h1 style="margin-bottom:4px;">Backend groups</h1>
-    <p class="refresh-note" id="refresh-note">Auto-refreshing every 5s · last updated just now</p>
-    {{if not .Groups}}
-      <div class="empty">No backend groups reported yet. The control plane's reconciliation loop runs periodically — check back shortly, or check the container logs if this persists.</div>
-    {{else}}
-      {{$csrf := .CSRFToken}}
-      {{$algorithms := .ValidAlgorithms}}
-      {{range .Groups}}
-      {{$group := .Group}}
-      {{$currentAlgo := .Algorithm}}
-      <div class="group-card">
-        <div class="group-title">{{.Group}}</div>
-        <div class="group-meta">version {{.Version}} · {{len .Backends}} backend(s) · {{.SubscriberCount}} data plane subscriber(s)</div>
-
-        <form class="algo-form" method="post" action="/algorithm">
-          <input type="hidden" name="csrf_token" value="{{$csrf}}">
-          <input type="hidden" name="group" value="{{$group}}">
-          <label for="algorithm-{{$group}}" style="margin:0; color:#9aa3b2; font-size:13px;">Algorithm</label>
-          <select id="algorithm-{{$group}}" name="algorithm">
-            {{range $algorithms}}
-            <option value="{{.}}" {{if eq . $currentAlgo}}selected{{end}}>{{.}}</option>
-            {{end}}
-          </select>
-          <button type="submit">Apply</button>
-        </form>
-
-        {{if .Backends}}
-        <table>
-          <tr><th>Address</th><th>Weight</th><th>Health</th><th>Actions</th></tr>
-          {{range .Backends}}
-          <tr{{if .Drained}} class="drained-row"{{end}}>
-            <td>{{.Address}}{{if .Drained}}<span class="tag-drained">drained</span>{{end}}</td>
-            <td>{{.Weight}}{{if .WeightOverridden}}<span class="tag-override">override</span>{{end}}</td>
-            <td>
-              {{if not .HealthKnown}}
-                <span class="health-dot health-dot--unknown"></span><span class="health-label">Unknown</span>
-              {{else if .Healthy}}
-                <span class="health-dot health-dot--healthy"></span><span class="health-label">Healthy</span>
-              {{else}}
-                <span class="health-dot health-dot--unhealthy"></span><span class="health-label">Unhealthy</span>
-              {{end}}
-            </td>
-            <td>
-              <div class="row-actions">
-                <form method="post" action="/override">
-                  <input type="hidden" name="csrf_token" value="{{$csrf}}">
-                  <input type="hidden" name="group" value="{{$group}}">
-                  <input type="hidden" name="address" value="{{.Address}}">
-                  <input type="hidden" name="action" value="set_weight">
-                  <input type="number" name="weight" min="0" placeholder="wt" value="{{.Weight}}">
-                  <button type="submit">Set</button>
-                </form>
-                <form method="post" action="/override">
-                  <input type="hidden" name="csrf_token" value="{{$csrf}}">
-                  <input type="hidden" name="group" value="{{$group}}">
-                  <input type="hidden" name="address" value="{{.Address}}">
-                  {{if .Drained}}
-                  <input type="hidden" name="action" value="clear">
-                  <button type="submit">Undrain</button>
-                  {{else}}
-                  <input type="hidden" name="action" value="drain">
-                  <button type="submit" class="danger">Drain</button>
+  <div class="app">
+    {{template "sidebar" (dict "Active" "dashboard")}}
+    <div class="main">
+      <header class="topbar">
+        <h1>Dashboard</h1>
+        <span class="sub">backend groups &amp; health, as reported by the pool provider and subscribed data planes</span>
+        <div class="right"><span class="clock-pill" id="clock"></span></div>
+      </header>
+      <div class="content">
+        <p class="refresh-note" id="refresh-note">Auto-refreshing every 5s · last updated just now</p>
+        {{if not .Groups}}
+          <div class="empty">No backend groups reported yet. The control plane's reconciliation loop runs periodically — check back shortly, or check the container logs if this persists.</div>
+        {{else}}
+          {{$csrf := .CSRFToken}}
+          {{$algorithms := .ValidAlgorithms}}
+          {{range .Groups}}
+          {{$group := .Group}}
+          {{$currentAlgo := .Algorithm}}
+          <section class="card">
+            <div class="card-head">
+              <h2>{{.Group}}</h2>
+              <span class="meta">version {{.Version}} · {{len .Backends}} backend(s) · {{.SubscriberCount}} data plane subscriber(s)</span>
+              <form method="post" action="/algorithm" style="margin-left:auto;display:flex;align-items:center;gap:7px">
+                <input type="hidden" name="csrf_token" value="{{$csrf}}">
+                <input type="hidden" name="group" value="{{$group}}">
+                <select name="algorithm" class="algo-select" aria-label="Load-balancing algorithm for {{$group}}">
+                  {{range $algorithms}}
+                  <option value="{{.}}" {{if eq . $currentAlgo}}selected{{end}}>{{.}}</option>
                   {{end}}
-                </form>
-              </div>
-            </td>
-          </tr>
+                </select>
+                <button type="submit" class="btn">Apply</button>
+              </form>
+            </div>
+            {{if .Backends}}
+            <table class="table">
+              <tr><th>Address</th><th>Weight</th><th>Health</th><th>Actions</th></tr>
+              {{range .Backends}}
+              <tr{{if .Drained}} class="drained-row"{{end}}>
+                <td class="mono">{{.Address}}{{if .Drained}}<span class="tag tag--drained">drained</span>{{end}}</td>
+                <td class="mono">{{.Weight}}{{if .WeightOverridden}}<span class="tag tag--override">override</span>{{end}}</td>
+                <td>
+                  {{if not .HealthKnown}}
+                    <span class="pill pill--unknown"><span class="dot dot--unknown"></span>Unknown</span>
+                  {{else if .Healthy}}
+                    <span class="pill pill--ok"><span class="dot dot--ok"></span>Healthy</span>
+                  {{else}}
+                    <span class="pill pill--down"><span class="dot dot--down"></span>Unhealthy</span>
+                  {{end}}
+                </td>
+                <td>
+                  <div class="row-actions">
+                    <form method="post" action="/override">
+                      <input type="hidden" name="csrf_token" value="{{$csrf}}">
+                      <input type="hidden" name="group" value="{{$group}}">
+                      <input type="hidden" name="address" value="{{.Address}}">
+                      <input type="hidden" name="action" value="set_weight">
+                      <input type="number" name="weight" min="0" placeholder="wt" value="{{.Weight}}" class="weight-input">
+                      <button type="submit" class="btn">Set</button>
+                    </form>
+                    <form method="post" action="/override">
+                      <input type="hidden" name="csrf_token" value="{{$csrf}}">
+                      <input type="hidden" name="group" value="{{$group}}">
+                      <input type="hidden" name="address" value="{{.Address}}">
+                      {{if .Drained}}
+                      <input type="hidden" name="action" value="clear">
+                      <button type="submit" class="btn">Undrain</button>
+                      {{else}}
+                      <input type="hidden" name="action" value="drain">
+                      <button type="submit" class="btn btn-danger">Drain</button>
+                      {{end}}
+                    </form>
+                  </div>
+                </td>
+              </tr>
+              {{end}}
+            </table>
+            {{end}}
+          </section>
           {{end}}
-        </table>
         {{end}}
       </div>
-      {{end}}
-    {{end}}
-  </main>
+    </div>
+  </div>
   <script>
-    // Simple polling auto-refresh: re-fetch the dashboard body every 5s and
-    // swap it in, rather than a full page reload, so scroll position and
-    // any in-progress interaction aren't disrupted. Falls back gracefully
-    // to a plain page (no auto-refresh) if JS is disabled.
+    // Live clock — purely cosmetic, computed client-side so it's always
+    // accurate without a server round trip.
     (function () {
-      var intervalMs = 5000;
+      var el = document.getElementById('clock');
+      function tick() { if (el) el.textContent = 'live · ' + new Date().toLocaleTimeString(); }
+      tick(); setInterval(tick, 1000);
+    })();
+    // Auto-refresh: re-fetch this page's content every 5s and swap the
+    // group cards in, rather than a full reload, so in-progress form
+    // input isn't disrupted. Falls back to a static page if JS is off.
+    (function () {
       function refresh() {
         fetch(window.location.pathname, { headers: { 'X-Requested-With': 'dashboard-poll' } })
           .then(function (res) { return res.ok ? res.text() : null; })
           .then(function (html) {
             if (!html) return;
-            var parser = new DOMParser();
-            var doc = parser.parseFromString(html, 'text/html');
-            var newMain = doc.querySelector('main');
-            var curMain = document.querySelector('main');
-            if (newMain && curMain) curMain.innerHTML = newMain.innerHTML;
+            var doc = new DOMParser().parseFromString(html, 'text/html');
+            var newContent = doc.querySelector('.content');
+            var curContent = document.querySelector('.content');
+            if (newContent && curContent) curContent.innerHTML = newContent.innerHTML;
             var note = document.getElementById('refresh-note');
             if (note) note.textContent = 'Auto-refreshing every 5s · last updated ' + new Date().toLocaleTimeString();
           })
           .catch(function () { /* network hiccup — try again next tick */ });
       }
-      setInterval(refresh, intervalMs);
+      setInterval(refresh, 5000);
+    })();
+  </script>
+</body>
+</html>
+{{end}}
+
+{{define "fleet"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fleet — jbalance</title>
+  {{template "style"}}
+</head>
+<body>
+  <div class="app">
+    {{template "sidebar" (dict "Active" "fleet")}}
+    <div class="main">
+      <header class="topbar">
+        <h1>Fleet</h1>
+        <span class="sub">data plane instances that have connected to this control plane</span>
+        <div class="right"><span class="clock-pill" id="clock"></span></div>
+      </header>
+      <div class="content">
+        {{if not .Instances}}
+          <div class="empty">No data plane instances have connected yet. An instance appears here as soon as it opens its gRPC stream to this control plane.</div>
+        {{else}}
+        <section class="card">
+          <table class="table">
+            <tr><th>Instance</th><th>Group</th><th>Stream</th><th>Connected</th><th>Last health report</th></tr>
+            {{range .Instances}}
+            <tr>
+              <td class="mono">{{.InstanceID}}</td>
+              <td class="mono">{{.Group}}</td>
+              <td>
+                {{if .Connected}}
+                  <span class="pill pill--ok"><span class="dot dot--ok"></span>Streaming</span>
+                {{else}}
+                  <span class="pill pill--unknown"><span class="dot dot--unknown"></span>Disconnected</span>
+                {{end}}
+              </td>
+              <td class="muted">{{.ConnectedFor}}</td>
+              <td class="muted">
+                {{if .HasHealthReport}}
+                  {{.LastHealthReport}} · {{.ReportedBackends}} backend(s)
+                {{else}}
+                  no report yet
+                {{end}}
+              </td>
+            </tr>
+            {{end}}
+          </table>
+        </section>
+        {{end}}
+      </div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var el = document.getElementById('clock');
+      function tick() { if (el) el.textContent = 'live · ' + new Date().toLocaleTimeString(); }
+      tick(); setInterval(tick, 1000);
     })();
   </script>
 </body>
@@ -252,41 +470,57 @@ const templatesSource = `
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Audit Log — Go Load Balancer</title>
+  <title>Audit Log — jbalance</title>
   {{template "style"}}
 </head>
 <body>
-  {{template "nav"}}
-  <main>
-    <h1 style="margin-bottom:4px;">Audit log</h1>
-    <p class="refresh-note">Most recent {{len .Entries}} event(s), newest first. Kept locally in the container, bounded to the last 500 events.</p>
-    {{if not .Entries}}
-      <div class="empty">No events recorded yet.</div>
-    {{else}}
-    <table>
-      <tr><th>Time</th><th>Event</th><th>IP</th><th>Details</th></tr>
-      {{range .Entries}}
-      <tr class="audit-row">
-        <td class="audit-time">{{.Time.Format "2006-01-02 15:04:05"}}</td>
-        <td>
-          {{if eq .Type "login_success"}}<span class="badge badge--ok">Login</span>
-          {{else if eq .Type "login_failure"}}<span class="badge badge--fail">Login failed</span>
-          {{else if eq .Type "login_rate_limited"}}<span class="badge badge--fail">Rate limited</span>
-          {{else if eq .Type "password_changed"}}<span class="badge badge--ok">Password changed</span>
-          {{else if eq .Type "password_reset"}}<span class="badge badge--fail">Password reset</span>
-          {{else if eq .Type "logout"}}<span class="badge">Logout</span>
-          {{else if eq .Type "override_changed"}}<span class="badge">Pool override</span>
-          {{else if eq .Type "algorithm_changed"}}<span class="badge">Algorithm</span>
-          {{else}}<span class="badge">{{.Type}}</span>
-          {{end}}
-        </td>
-        <td>{{.IP}}</td>
-        <td>{{.Message}}</td>
-      </tr>
-      {{end}}
-    </table>
-    {{end}}
-  </main>
+  <div class="app">
+    {{template "sidebar" (dict "Active" "audit")}}
+    <div class="main">
+      <header class="topbar">
+        <h1>Audit Log</h1>
+        <span class="sub">most recent {{len .Entries}} event(s), newest first · bounded to the last 500, kept locally</span>
+        <div class="right"><span class="clock-pill" id="clock"></span></div>
+      </header>
+      <div class="content">
+        {{if not .Entries}}
+          <div class="empty">No events recorded yet.</div>
+        {{else}}
+        <section class="card">
+          <table class="table">
+            <tr><th>Time</th><th>Event</th><th>IP</th><th>Details</th></tr>
+            {{range .Entries}}
+            <tr>
+              <td class="mono muted">{{.Time.Format "2006-01-02 15:04:05"}}</td>
+              <td>
+                {{if eq .Type "login_success"}}<span class="pill pill--ok">Login</span>
+                {{else if eq .Type "login_failure"}}<span class="pill pill--down">Login failed</span>
+                {{else if eq .Type "login_rate_limited"}}<span class="pill pill--down">Rate limited</span>
+                {{else if eq .Type "password_changed"}}<span class="pill pill--ok">Password changed</span>
+                {{else if eq .Type "password_reset"}}<span class="pill pill--down">Password reset</span>
+                {{else if eq .Type "logout"}}<span class="pill pill--unknown">Logout</span>
+                {{else if eq .Type "override_changed"}}<span class="pill pill--unknown">Pool override</span>
+                {{else if eq .Type "algorithm_changed"}}<span class="pill pill--unknown">Algorithm</span>
+                {{else}}<span class="pill pill--unknown">{{.Type}}</span>
+                {{end}}
+              </td>
+              <td class="mono muted">{{.IP}}</td>
+              <td>{{.Message}}</td>
+            </tr>
+            {{end}}
+          </table>
+        </section>
+        {{end}}
+      </div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var el = document.getElementById('clock');
+      function tick() { if (el) el.textContent = 'live · ' + new Date().toLocaleTimeString(); }
+      tick(); setInterval(tick, 1000);
+    })();
+  </script>
 </body>
 </html>
 {{end}}
@@ -297,29 +531,49 @@ const templatesSource = `
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Change Password — Go Load Balancer</title>
+  <title>Change Password — jbalance</title>
   {{template "style"}}
 </head>
 <body>
-  {{template "nav"}}
-  <main>
-    <div style="max-width:380px; margin:0 auto;">
-      <h1>Change password</h1>
-      <h2>Changing your password signs out all other active sessions.</h2>
-      {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
-      {{if .Success}}<div class="success">Password updated successfully.</div>{{end}}
-      <form method="post" action="/password">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <label for="current_password">Current password</label>
-        <input type="password" id="current_password" name="current_password" required>
-        <label for="new_password">New password</label>
-        <input type="password" id="new_password" name="new_password" required minlength="12">
-        <label for="confirm_password">Confirm new password</label>
-        <input type="password" id="confirm_password" name="confirm_password" required minlength="12">
-        <button type="submit">Update password</button>
-      </form>
+  <div class="app">
+    {{template "sidebar" (dict "Active" "password")}}
+    <div class="main">
+      <header class="topbar">
+        <h1>Change Password</h1>
+        <span class="sub">changing your password signs out every other active session</span>
+        <div class="right"><span class="clock-pill" id="clock"></span></div>
+      </header>
+      <div class="content">
+        <section class="card card-pad" style="max-width:380px">
+          {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+          {{if .Success}}<div class="success">Password updated successfully.</div>{{end}}
+          <form method="post" action="/password">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <div class="field">
+              <label for="current_password">Current password</label>
+              <input type="password" id="current_password" name="current_password" required>
+            </div>
+            <div class="field">
+              <label for="new_password">New password</label>
+              <input type="password" id="new_password" name="new_password" required minlength="12">
+            </div>
+            <div class="field">
+              <label for="confirm_password">Confirm new password</label>
+              <input type="password" id="confirm_password" name="confirm_password" required minlength="12">
+            </div>
+            <button type="submit" class="btn btn-primary btn-full">Update password</button>
+          </form>
+        </section>
+      </div>
     </div>
-  </main>
+  </div>
+  <script>
+    (function () {
+      var el = document.getElementById('clock');
+      function tick() { if (el) el.textContent = 'live · ' + new Date().toLocaleTimeString(); }
+      tick(); setInterval(tick, 1000);
+    })();
+  </script>
 </body>
 </html>
 {{end}}

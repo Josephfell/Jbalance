@@ -263,3 +263,107 @@ func TestServer_ForceRepublish_BumpsVersionEvenIfSetLooksUnchanged(t *testing.T)
 		t.Errorf("expected forceRepublish to bump version from %d to %d, got %d", v1, v1+1, v2)
 	}
 }
+
+func TestServer_FleetSnapshot_EmptyBeforeAnyConnection(t *testing.T) {
+	srv := NewServer(nil, nil, nil)
+	if got := srv.FleetSnapshot(); len(got) != 0 {
+		t.Errorf("expected an empty fleet before any instance connects, got %v", got)
+	}
+}
+
+func TestServer_FleetSnapshot_ReflectsConnectAndDisconnect(t *testing.T) {
+	srv := NewServer(nil, nil, nil)
+
+	srv.markInstanceConnected("dp-1", "web-tier")
+	fleet := srv.FleetSnapshot()
+	if len(fleet) != 1 {
+		t.Fatalf("expected 1 fleet entry after connect, got %d", len(fleet))
+	}
+	if fleet[0].InstanceID != "dp-1" || fleet[0].Group != "web-tier" || !fleet[0].Connected {
+		t.Errorf("unexpected fleet entry after connect: %+v", fleet[0])
+	}
+
+	srv.markInstanceDisconnected("dp-1")
+	fleet = srv.FleetSnapshot()
+	if len(fleet) != 1 {
+		t.Fatalf("expected the entry to persist (not be removed) after disconnect, got %d entries", len(fleet))
+	}
+	if fleet[0].Connected {
+		t.Error("expected Connected to be false after markInstanceDisconnected")
+	}
+}
+
+func TestServer_FleetSnapshot_IgnoresEmptyInstanceID(t *testing.T) {
+	srv := NewServer(nil, nil, nil)
+	srv.markInstanceConnected("", "web-tier")
+	srv.markInstanceDisconnected("")
+	srv.recordInstanceHealthReport("", 3, time.Now())
+
+	if got := srv.FleetSnapshot(); len(got) != 0 {
+		t.Errorf("expected an empty instance ID to be skipped entirely, got %v", got)
+	}
+}
+
+func TestServer_FleetSnapshot_ReconnectOverwritesPriorEntry(t *testing.T) {
+	srv := NewServer(nil, nil, nil)
+	srv.markInstanceConnected("dp-1", "web-tier")
+	srv.markInstanceDisconnected("dp-1")
+
+	srv.markInstanceConnected("dp-1", "api-tier") // reconnected, now serving a different group
+	fleet := srv.FleetSnapshot()
+	if len(fleet) != 1 {
+		t.Fatalf("expected reconnecting to overwrite the prior entry rather than add a second, got %d entries", len(fleet))
+	}
+	if fleet[0].Group != "api-tier" || !fleet[0].Connected {
+		t.Errorf("expected the reconnected entry to reflect the new group and Connected=true, got %+v", fleet[0])
+	}
+}
+
+func TestServer_FleetSnapshot_HealthReportUpdatesExistingEntry(t *testing.T) {
+	srv := NewServer(nil, nil, nil)
+	srv.markInstanceConnected("dp-1", "web-tier")
+
+	now := time.Now()
+	srv.recordInstanceHealthReport("dp-1", 4, now)
+
+	fleet := srv.FleetSnapshot()
+	if len(fleet) != 1 {
+		t.Fatalf("expected 1 fleet entry, got %d", len(fleet))
+	}
+	if fleet[0].ReportedBackends != 4 {
+		t.Errorf("expected ReportedBackends 4, got %d", fleet[0].ReportedBackends)
+	}
+	if !fleet[0].LastHealthReport.Equal(now) {
+		t.Errorf("expected LastHealthReport %v, got %v", now, fleet[0].LastHealthReport)
+	}
+}
+
+func TestServer_FleetSnapshot_HealthReportWithoutStreamIsNoop(t *testing.T) {
+	srv := NewServer(nil, nil, nil)
+	// No markInstanceConnected call — a health report for an instance
+	// with no fleet entry yet should not fabricate one.
+	srv.recordInstanceHealthReport("dp-ghost", 2, time.Now())
+
+	if got := srv.FleetSnapshot(); len(got) != 0 {
+		t.Errorf("expected no fleet entry to be created from a health report alone, got %v", got)
+	}
+}
+
+func TestServer_FleetSnapshot_SortedByInstanceID(t *testing.T) {
+	srv := NewServer(nil, nil, nil)
+	srv.markInstanceConnected("dp-3", "web-tier")
+	srv.markInstanceConnected("dp-1", "web-tier")
+	srv.markInstanceConnected("dp-2", "web-tier")
+
+	fleet := srv.FleetSnapshot()
+	if len(fleet) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(fleet))
+	}
+	want := []string{"dp-1", "dp-2", "dp-3"}
+	for i, id := range want {
+		if fleet[i].InstanceID != id {
+			t.Errorf("expected sorted order %v, got %v", want, fleet)
+			break
+		}
+	}
+}

@@ -8,6 +8,7 @@ package controlplane
 import (
 	"context"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -33,6 +34,29 @@ type healthEntry struct {
 	reportedAt time.Time
 }
 
+// instanceKey identifies one currently-or-recently-connected data plane
+// instance. Keyed by instanceID alone (not also group) since an
+// instance ID is expected to be unique per data plane process — if two
+// concurrently-connected streams ever reported the same instanceID for
+// different groups, the most recent StreamBackends call wins the fleet
+// entry, which is an acceptable edge case for a display-only feature.
+type instanceKey string
+
+// instanceState tracks one data plane instance for the admin UI's Fleet
+// view, independent of the per-backend health map: it answers "which data
+// planes are out there and are they currently connected", not "what do
+// they think about any given backend".
+type instanceState struct {
+	group       string
+	connectedAt time.Time
+	connected   bool // false once the StreamBackends call for this instance returns
+	// lastHealthReportAt and reportedBackends come from ReportHealth calls
+	// naming this instanceID — zero until the first report arrives, which
+	// can lag connectedAt by up to one health-report interval.
+	lastHealthReportAt time.Time
+	reportedBackends   int
+}
+
 // Server implements pb.ControlPlaneServer.
 type Server struct {
 	pb.UnimplementedControlPlaneServer
@@ -47,6 +71,9 @@ type Server struct {
 
 	healthMu sync.RWMutex
 	health   map[backendHealthKey]healthEntry
+
+	instancesMu sync.RWMutex
+	instances   map[instanceKey]*instanceState
 }
 
 // NewServer creates a control plane server backed by the given provider.
@@ -68,6 +95,7 @@ func NewServer(provider pool.Provider, overrides *OverrideStore, algorithms *Alg
 		subs:       make(map[string]map[chan *pb.BackendSet]struct{}),
 		last:       make(map[string]*pb.BackendSet),
 		health:     make(map[backendHealthKey]healthEntry),
+		instances:  make(map[instanceKey]*instanceState),
 	}
 }
 
@@ -232,6 +260,9 @@ func (s *Server) StreamBackends(req *pb.StreamBackendsRequest, stream pb.Control
 	s.subscribe(group, ch)
 	defer s.unsubscribe(group, ch)
 
+	s.markInstanceConnected(instanceID, group)
+	defer s.markInstanceDisconnected(instanceID)
+
 	log.Printf("controlplane: data plane %q subscribed to group %q", instanceID, group)
 
 	// Send the current snapshot immediately so a newly-connected data plane
@@ -282,7 +313,61 @@ func (s *Server) ReportHealth(_ context.Context, report *pb.HealthReport) (*pb.H
 	}
 	s.healthMu.Unlock()
 
+	s.recordInstanceHealthReport(report.GetInstanceId(), len(report.GetBackends()), now)
+
 	return &pb.HealthReportAck{}, nil
+}
+
+// markInstanceConnected records that instanceID has an active
+// StreamBackends call for group, for display on the admin UI's Fleet
+// view. Overwrites any prior entry for this instanceID — an instance
+// reconnecting under the same ID (e.g. after a control-plane restart)
+// should show its new connection time, not a stale one.
+func (s *Server) markInstanceConnected(instanceID, group string) {
+	if instanceID == "" {
+		return // nothing to key the fleet entry on; skip rather than collide entries
+	}
+	s.instancesMu.Lock()
+	defer s.instancesMu.Unlock()
+	s.instances[instanceKey(instanceID)] = &instanceState{
+		group:       group,
+		connectedAt: time.Now(),
+		connected:   true,
+	}
+}
+
+// markInstanceDisconnected marks instanceID as no longer streaming, once
+// its StreamBackends call returns (client disconnect, context
+// cancellation, or a send error). The entry is kept (not deleted) so the
+// Fleet view can show "last seen" for an instance that disconnected
+// recently, rather than having it vanish instantly.
+func (s *Server) markInstanceDisconnected(instanceID string) {
+	if instanceID == "" {
+		return
+	}
+	s.instancesMu.Lock()
+	defer s.instancesMu.Unlock()
+	if st, ok := s.instances[instanceKey(instanceID)]; ok {
+		st.connected = false
+	}
+}
+
+// recordInstanceHealthReport updates the fleet entry for instanceID with
+// the time and size of its most recent ReportHealth call. A no-op if the
+// instance has no StreamBackends-derived fleet entry yet — a health
+// report received before (or without) an active stream is rare (only a
+// brief startup race) and not worth fabricating a synthetic connection
+// entry for.
+func (s *Server) recordInstanceHealthReport(instanceID string, backendCount int, at time.Time) {
+	if instanceID == "" {
+		return
+	}
+	s.instancesMu.Lock()
+	defer s.instancesMu.Unlock()
+	if st, ok := s.instances[instanceKey(instanceID)]; ok {
+		st.lastHealthReportAt = at
+		st.reportedBackends = backendCount
+	}
 }
 
 // healthForAddress aggregates all non-stale reports for a given
@@ -425,6 +510,48 @@ func (s *Server) Snapshot(ctx context.Context) []GroupState {
 		})
 	}
 	return states
+}
+
+// InstanceState is a read-only view of one data plane instance's
+// connection state, for display on the admin UI's Fleet view.
+type InstanceState struct {
+	InstanceID string
+	Group      string
+	// Connected is true if this instance currently has an active
+	// StreamBackends call open.
+	Connected bool
+	// ConnectedSince is when the current (or most recent, if Connected is
+	// false) StreamBackends call began.
+	ConnectedSince time.Time
+	// LastHealthReport is the zero time if this instance has never called
+	// ReportHealth.
+	LastHealthReport time.Time
+	ReportedBackends int
+}
+
+// FleetSnapshot returns every known data plane instance (currently
+// connected or seen recently), sorted by instance ID for stable display.
+// An instance is remembered until the control plane process restarts —
+// there is deliberately no expiry here, since "this instance disconnected
+// 20 minutes ago and hasn't come back" is exactly the kind of thing an
+// operator wants the Fleet view to still show, not silently drop.
+func (s *Server) FleetSnapshot() []InstanceState {
+	s.instancesMu.RLock()
+	defer s.instancesMu.RUnlock()
+
+	out := make([]InstanceState, 0, len(s.instances))
+	for id, st := range s.instances {
+		out = append(out, InstanceState{
+			InstanceID:       string(id),
+			Group:            st.group,
+			Connected:        st.connected,
+			ConnectedSince:   st.connectedAt,
+			LastHealthReport: st.lastHealthReportAt,
+			ReportedBackends: st.reportedBackends,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].InstanceID < out[j].InstanceID })
+	return out
 }
 
 // snapshotToBackendSet converts a provider snapshot into the wire format,

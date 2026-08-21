@@ -114,6 +114,16 @@ even if others can still reach it. Reports older than 30 seconds are
 treated as stale and revert to Unknown, so a dead/disconnected data plane
 doesn't leave misleadingly "healthy" state on the dashboard forever.
 
+**Fleet.** Available at **Fleet** in the nav bar — every data plane
+instance that has opened a `StreamBackends` gRPC connection to this
+control plane, whether currently streaming or disconnected. Shows the
+instance ID, which group it serves, connection state, how long it's been
+connected (or how long since it disconnected), and its most recent
+`ReportHealth` call (time and backend count). An instance's entry is kept
+even after it disconnects, so "this one dropped 20 minutes ago and hasn't
+come back" stays visible rather than silently vanishing — it's only
+cleared by a control plane restart.
+
 **Audit log.** Available at **Audit Log** in the nav bar — records login
 successes/failures, rate-limit lockouts, password changes, password resets
 (via `-admin-force-reset-password`), logouts, pool overrides, and algorithm

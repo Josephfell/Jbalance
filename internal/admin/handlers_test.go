@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Josephfell/Jbalance/internal/controlplane"
 )
@@ -18,6 +19,8 @@ import (
 type fakeStateProvider struct{}
 
 func (fakeStateProvider) Snapshot(context.Context) []controlplane.GroupState { return nil }
+
+func (fakeStateProvider) FleetSnapshot() []controlplane.InstanceState { return nil }
 
 func (fakeStateProvider) SetOverride(context.Context, string, string, *int32, bool) error {
 	return nil
@@ -383,6 +386,7 @@ type spyStateProvider struct {
 	clearCalls     []clearCall
 	algorithmCalls []algorithmCall
 	err            error
+	fleet          []controlplane.InstanceState
 }
 
 type overrideCall struct {
@@ -401,6 +405,8 @@ type algorithmCall struct {
 }
 
 func (s *spyStateProvider) Snapshot(context.Context) []controlplane.GroupState { return nil }
+
+func (s *spyStateProvider) FleetSnapshot() []controlplane.InstanceState { return s.fleet }
 
 func (s *spyStateProvider) SetOverride(_ context.Context, group, address string, weight *int32, drained bool) error {
 	s.overrideCalls = append(s.overrideCalls, overrideCall{group, address, weight, drained})
@@ -633,5 +639,94 @@ func TestHandler_AlgorithmSubmit_RequiresAuth(t *testing.T) {
 	}
 	if len(spy.algorithmCalls) != 0 {
 		t.Errorf("expected no SetAlgorithm call without auth, got %d", len(spy.algorithmCalls))
+	}
+}
+
+func TestHandler_FleetPage_RendersEmptyState(t *testing.T) {
+	srv, password := newTestServer(t)
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/fleet", nil)
+	req.AddCookie(session)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "No data plane instances have connected yet") {
+		t.Error("expected the empty-state message when no instances are reported")
+	}
+}
+
+func TestHandler_FleetPage_RequiresAuth(t *testing.T) {
+	srv, _ := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/fleet", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("expected an unauthenticated request to be redirected, got %d", rec.Code)
+	}
+}
+
+func TestHandler_FleetPage_RendersInstanceRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admin.json")
+	store, generated, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	spy := &spyStateProvider{
+		fleet: []controlplane.InstanceState{
+			{InstanceID: "dp-1", Group: "web-tier", Connected: true, ConnectedSince: time.Now().Add(-90 * time.Second)},
+			{InstanceID: "dp-2", Group: "api-tier", Connected: false, ConnectedSince: time.Now().Add(-3 * time.Hour)},
+		},
+	}
+	srv, err := NewServer(store, spy, OpenAuditLog(""), false, false)
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, generated.Password)
+
+	req := httptest.NewRequest(http.MethodGet, "/fleet", nil)
+	req.AddCookie(session)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "dp-1") || !strings.Contains(body, "web-tier") {
+		t.Errorf("expected the connected instance to be rendered, got: %s", body)
+	}
+	if !strings.Contains(body, "dp-2") || !strings.Contains(body, "api-tier") {
+		t.Errorf("expected the disconnected instance to be rendered, got: %s", body)
+	}
+	if !strings.Contains(body, "Streaming") {
+		t.Error("expected the connected instance to show as Streaming")
+	}
+	if !strings.Contains(body, "Disconnected") {
+		t.Error("expected the disconnected instance to show as Disconnected")
+	}
+	if !strings.Contains(body, "no report yet") {
+		t.Error("expected instances with no health report to show 'no report yet'")
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{5 * time.Second, "5s"},
+		{90 * time.Second, "1m"},
+		{45 * time.Minute, "45m"},
+		{3 * time.Hour, "3h"},
+		{50 * time.Hour, "2d"},
+	}
+	for _, tc := range cases {
+		if got := formatDuration(tc.d); got != tc.want {
+			t.Errorf("formatDuration(%v) = %q, want %q", tc.d, got, tc.want)
+		}
 	}
 }

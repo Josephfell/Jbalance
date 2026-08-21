@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"html/template"
 	"net"
 	"net/http"
@@ -22,6 +23,7 @@ type StateProvider interface {
 	SetOverride(ctx context.Context, group, address string, weight *int32, drained bool) error
 	ClearOverride(ctx context.Context, group, address string) error
 	SetAlgorithm(ctx context.Context, group string, algorithm controlplane.Algorithm) error
+	FleetSnapshot() []controlplane.InstanceState
 }
 
 // Server serves the admin web management interface: a password-protected
@@ -52,7 +54,27 @@ type Server struct {
 // trustForwardedFor only when running behind a trusted reverse proxy that
 // itself sets X-Forwarded-For.
 func NewServer(store *Store, stateProvider StateProvider, auditLog *AuditLog, secureCookies, trustForwardedFor bool) (*Server, error) {
-	tmpl, err := template.New("admin").Parse(templatesSource)
+	// dict lets the sidebar partial be invoked with an argument (which nav
+	// item is active) despite html/template's block syntax only accepting
+	// a single value — {{template "sidebar" (dict "Active" "fleet")}}
+	// builds that single value as a map on the fly.
+	funcs := template.FuncMap{
+		"dict": func(pairs ...any) (map[string]any, error) {
+			if len(pairs)%2 != 0 {
+				return nil, fmt.Errorf("dict: odd number of arguments")
+			}
+			m := make(map[string]any, len(pairs)/2)
+			for i := 0; i < len(pairs); i += 2 {
+				key, ok := pairs[i].(string)
+				if !ok {
+					return nil, fmt.Errorf("dict: key %v is not a string", pairs[i])
+				}
+				m[key] = pairs[i+1]
+			}
+			return m, nil
+		},
+	}
+	tmpl, err := template.New("admin").Funcs(funcs).Parse(templatesSource)
 	if err != nil {
 		return nil, err
 	}
@@ -80,6 +102,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /password", s.requireAuth(s.handlePasswordPage))
 	mux.HandleFunc("POST /password", s.requireAuth(s.handlePasswordSubmit))
 	mux.HandleFunc("GET /audit", s.requireAuth(s.handleAuditPage))
+	mux.HandleFunc("GET /fleet", s.requireAuth(s.handleFleetPage))
 	return mux
 }
 
@@ -230,6 +253,61 @@ func (s *Server) handleAlgorithmSubmit(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAuditPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "audit", map[string]any{"Entries": s.audit.Recent(200)})
+}
+
+// fleetRow is the display-ready form of controlplane.InstanceState — the
+// template package has no registered funcs for formatting durations, so
+// that's done here instead of in the template itself.
+type fleetRow struct {
+	InstanceID       string
+	Group            string
+	Connected        bool
+	ConnectedFor     string
+	LastHealthReport string
+	ReportedBackends int
+	HasHealthReport  bool
+}
+
+func (s *Server) handleFleetPage(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	instances := s.state.FleetSnapshot()
+	rows := make([]fleetRow, 0, len(instances))
+	for _, inst := range instances {
+		row := fleetRow{
+			InstanceID:       inst.InstanceID,
+			Group:            inst.Group,
+			Connected:        inst.Connected,
+			ReportedBackends: inst.ReportedBackends,
+		}
+		if inst.Connected {
+			row.ConnectedFor = formatDuration(now.Sub(inst.ConnectedSince)) + " ago"
+		} else {
+			row.ConnectedFor = "disconnected " + formatDuration(now.Sub(inst.ConnectedSince)) + " ago"
+		}
+		if !inst.LastHealthReport.IsZero() {
+			row.HasHealthReport = true
+			row.LastHealthReport = formatDuration(now.Sub(inst.LastHealthReport)) + " ago"
+		}
+		rows = append(rows, row)
+	}
+	s.render(w, "fleet", map[string]any{"Instances": rows})
+}
+
+// formatDuration renders d as a short, human-scale duration ("4s", "12m",
+// "3h", "2d") — coarser than time.Duration.String() on purpose, since the
+// Fleet view cares about "roughly how long", not precise sub-second
+// values.
+func formatDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return strconv.Itoa(int(d.Seconds())) + "s"
+	case d < time.Hour:
+		return strconv.Itoa(int(d.Minutes())) + "m"
+	case d < 24*time.Hour:
+		return strconv.Itoa(int(d.Hours())) + "h"
+	default:
+		return strconv.Itoa(int(d.Hours()/24)) + "d"
+	}
 }
 
 func (s *Server) handlePasswordPage(w http.ResponseWriter, r *http.Request) {
