@@ -3,7 +3,7 @@ package dataplane
 import (
 	"testing"
 
-	pb "github.com/josephfell/go-loadbalancer/proto"
+	pb "github.com/Josephfell/Jbalance/proto"
 )
 
 func TestBackendList_RoundRobin(t *testing.T) {

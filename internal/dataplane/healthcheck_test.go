@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/josephfell/go-loadbalancer/proto"
+	pb "github.com/Josephfell/Jbalance/proto"
 )
 
 // listenOnce starts a TCP listener that accepts and immediately closes

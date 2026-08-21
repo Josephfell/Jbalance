@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	pb "github.com/josephfell/go-loadbalancer/proto"
+	pb "github.com/Josephfell/Jbalance/proto"
 )
 
 // HealthReporter periodically sends this data plane instance's locally

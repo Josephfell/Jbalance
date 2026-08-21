@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package controlplane;
 
-option go_package = "github.com/josephfell/go-loadbalancer/proto";
+option go_package = "github.com/Josephfell/Jbalance/proto";
 
 // ControlPlane is implemented by the control plane and consumed by data
 // plane proxy instances. A data plane connects once and receives a stream

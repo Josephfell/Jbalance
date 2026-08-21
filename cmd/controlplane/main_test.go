@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/josephfell/go-loadbalancer/internal/pool"
+	"github.com/Josephfell/Jbalance/internal/pool"
 )
 
 func TestParseAzureVMSSGroups_Empty(t *testing.T) {

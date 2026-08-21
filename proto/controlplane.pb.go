@@ -383,7 +383,7 @@ const file_proto_controlplane_proto_rawDesc = "" +
 	"\x0fHealthReportAck2\xac\x01\n" +
 	"\fControlPlane\x12Q\n" +
 	"\x0eStreamBackends\x12#.controlplane.StreamBackendsRequest\x1a\x18.controlplane.BackendSet0\x01\x12I\n" +
-	"\fReportHealth\x12\x1a.controlplane.HealthReport\x1a\x1d.controlplane.HealthReportAckB-Z+github.com/josephfell/go-loadbalancer/protob\x06proto3"
+	"\fReportHealth\x12\x1a.controlplane.HealthReport\x1a\x1d.controlplane.HealthReportAckB&Z$github.com/Josephfell/Jbalance/protob\x06proto3"
 
 var (
 	file_proto_controlplane_proto_rawDescOnce sync.Once

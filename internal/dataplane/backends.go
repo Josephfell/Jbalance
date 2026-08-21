@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	pb "github.com/josephfell/go-loadbalancer/proto"
+	pb "github.com/Josephfell/Jbalance/proto"
 )
 
 // Algorithm identifies how BackendList.Next selects among healthy

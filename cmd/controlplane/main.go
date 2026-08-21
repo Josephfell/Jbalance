@@ -21,12 +21,12 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	"github.com/josephfell/go-loadbalancer/internal/admin"
-	"github.com/josephfell/go-loadbalancer/internal/controlplane"
-	"github.com/josephfell/go-loadbalancer/internal/envflag"
-	"github.com/josephfell/go-loadbalancer/internal/pool"
-	"github.com/josephfell/go-loadbalancer/internal/tlsutil"
-	pb "github.com/josephfell/go-loadbalancer/proto"
+	"github.com/Josephfell/Jbalance/internal/admin"
+	"github.com/Josephfell/Jbalance/internal/controlplane"
+	"github.com/Josephfell/Jbalance/internal/envflag"
+	"github.com/Josephfell/Jbalance/internal/pool"
+	"github.com/Josephfell/Jbalance/internal/tlsutil"
+	pb "github.com/Josephfell/Jbalance/proto"
 )
 
 // Every flag below can also be set via the environment variable named in

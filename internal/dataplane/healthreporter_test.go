@@ -8,7 +8,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	pb "github.com/josephfell/go-loadbalancer/proto"
+	pb "github.com/Josephfell/Jbalance/proto"
 )
 
 // fakeControlPlane implements pb.ControlPlaneServer, recording every

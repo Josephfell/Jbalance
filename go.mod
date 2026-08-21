@@ -1,4 +1,4 @@
-module github.com/josephfell/go-loadbalancer
+module github.com/Josephfell/Jbalance
 
 go 1.26.7
 

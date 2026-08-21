@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/josephfell/go-loadbalancer/internal/pool"
-	pb "github.com/josephfell/go-loadbalancer/proto"
+	"github.com/Josephfell/Jbalance/internal/pool"
+	pb "github.com/Josephfell/Jbalance/proto"
 )
 
 // backendHealthKey identifies one backend address as reported by one

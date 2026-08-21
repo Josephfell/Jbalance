@@ -17,9 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/josephfell/go-loadbalancer/internal/dataplane"
-	"github.com/josephfell/go-loadbalancer/internal/envflag"
-	"github.com/josephfell/go-loadbalancer/internal/tlsutil"
+	"github.com/Josephfell/Jbalance/internal/dataplane"
+	"github.com/Josephfell/Jbalance/internal/envflag"
+	"github.com/Josephfell/Jbalance/internal/tlsutil"
 )
 
 // Every flag below can also be set via the environment variable named in

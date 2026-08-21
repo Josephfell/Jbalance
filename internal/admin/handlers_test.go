@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/josephfell/go-loadbalancer/internal/controlplane"
+	"github.com/Josephfell/Jbalance/internal/controlplane"
 )
 
 // fakeStateProvider is a minimal StateProvider for tests that don't care

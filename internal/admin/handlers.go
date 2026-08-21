@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/josephfell/go-loadbalancer/internal/controlplane"
+	"github.com/Josephfell/Jbalance/internal/controlplane"
 )
 
 // StateProvider is implemented by anything that can report current
