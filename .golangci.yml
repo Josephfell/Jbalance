@@ -46,11 +46,11 @@ linters:
       - path: internal/admin/(store|audit)\.go
         linters:
           - gosec
-      # controlplane/overrides.go, algorithm.go, and routes.go follow the
-      # same local JSON file store pattern (admin-configured, no external
-      # database) — the path is operator-provided via a CLI flag, not
-      # external input.
-      - path: internal/controlplane/(overrides|algorithm|routes)\.go
+      # controlplane/overrides.go, algorithm.go, routes.go, and sticky.go
+      # follow the same local JSON file store pattern (admin-configured,
+      # no external database) — the path is operator-provided via a CLI
+      # flag, not external input.
+      - path: internal/controlplane/(overrides|algorithm|routes|sticky)\.go
         linters:
           - gosec
       # G124: every cookie set via http.SetCookie in this package does set

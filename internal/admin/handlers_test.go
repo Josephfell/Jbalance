@@ -26,6 +26,10 @@ func (fakeStateProvider) Routes() []controlplane.Route { return nil }
 
 func (fakeStateProvider) SetRoutes([]controlplane.Route) error { return nil }
 
+func (fakeStateProvider) SetSticky(context.Context, string, controlplane.StickyConfig) error {
+	return nil
+}
+
 func (fakeStateProvider) SetOverride(context.Context, string, string, *int32, bool) error {
 	return nil
 }
@@ -393,6 +397,12 @@ type spyStateProvider struct {
 	fleet          []controlplane.InstanceState
 	routes         []controlplane.Route
 	routesSaved    []controlplane.Route
+	stickyCalls    []stickyCall
+}
+
+type stickyCall struct {
+	group string
+	cfg   controlplane.StickyConfig
 }
 
 type overrideCall struct {
@@ -418,6 +428,11 @@ func (s *spyStateProvider) Routes() []controlplane.Route { return s.routes }
 
 func (s *spyStateProvider) SetRoutes(routes []controlplane.Route) error {
 	s.routesSaved = routes
+	return s.err
+}
+
+func (s *spyStateProvider) SetSticky(_ context.Context, group string, cfg controlplane.StickyConfig) error {
+	s.stickyCalls = append(s.stickyCalls, stickyCall{group, cfg})
 	return s.err
 }
 
@@ -942,5 +957,182 @@ func TestValueAt(t *testing.T) {
 	}
 	if valueAt(s, -1) != "" {
 		t.Errorf("expected a negative index to return empty string, got %q", valueAt(s, -1))
+	}
+}
+
+// TestHandler_LoginPage_ReusesExistingCSRFCookieAcrossConcurrentRequests
+// is a regression test for a real bug: handleLoginPage used to mint a
+// brand new CSRF cookie on every single GET /login, unconditionally. In
+// a browser, any other request sharing the same cookie jar while the
+// login page is open — a favicon fetch, a second tab, a redirect from
+// hitting a protected route while logged out — would silently overwrite
+// the cookie the visible page's <form> still references, so submitting
+// that (now-stale) form failed with "Session expired" even though the
+// user never actually left or reloaded the page.
+func TestHandler_LoginPage_ReusesExistingCSRFCookieAcrossConcurrentRequests(t *testing.T) {
+	srv, password := newTestServer(t)
+	handler := srv.Handler()
+
+	// First "tab": load the login page and capture its form token.
+	cookies, formToken := getCSRFAndCookies(t, handler, "/login")
+
+	// Simulate an unrelated background request sharing the same cookie
+	// jar — e.g. the browser redirecting a stray request to a
+	// protected route back to GET /login.
+	req2 := httptest.NewRequest(http.MethodGet, "/login", nil)
+	for _, c := range cookies {
+		req2.AddCookie(c)
+	}
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	// The cookie must not have been rotated: submitting the ORIGINAL
+	// form's token, with the ORIGINAL cookie, must still succeed.
+	form := url.Values{"password": {password}, "csrf_token": {formToken}}
+	req3 := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	req3.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, c := range cookies {
+		req3.AddCookie(c)
+	}
+	rec3 := httptest.NewRecorder()
+	handler.ServeHTTP(rec3, req3)
+
+	if rec3.Code != http.StatusSeeOther {
+		t.Fatalf("expected the original form token to still be valid after a concurrent GET /login, got %d: %s", rec3.Code, rec3.Body.String())
+	}
+}
+
+func TestCSRFToken_ReusesExistingCookieValue(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	req.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "existing-token-value"})
+	rec := httptest.NewRecorder()
+
+	got := srv.csrfToken(rec, req)
+	if got != "existing-token-value" {
+		t.Errorf("expected csrfToken to reuse the existing cookie value, got %q", got)
+	}
+	// Must not have set a new cookie, since a valid one was already present.
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == csrfCookieName {
+			t.Error("expected csrfToken not to re-set the cookie when a valid one already exists on the request")
+		}
+	}
+}
+
+func TestCSRFToken_MintsNewTokenWhenNoneExists(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	rec := httptest.NewRecorder()
+
+	got := srv.csrfToken(rec, req)
+	if got == "" {
+		t.Fatal("expected a freshly minted, non-empty token")
+	}
+
+	var found bool
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == csrfCookieName && c.Value == got {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected csrfToken to set a cookie matching the returned token when none existed")
+	}
+}
+
+func TestHandler_StickySubmit_EnablesWithCustomCookieAndTTL(t *testing.T) {
+	srv, password, spy := newTestServerWithSpy(t)
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, password)
+	cookies, csrf := getAuthedCSRFAndCookies(t, handler, "/", session)
+
+	form := url.Values{
+		"csrf_token":  {csrf},
+		"group":       {"g1"},
+		"enabled":     {"on"},
+		"cookie_name": {"my_cookie"},
+		"ttl_minutes": {"45"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/sticky", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected a redirect, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(spy.stickyCalls) != 1 {
+		t.Fatalf("expected 1 SetSticky call, got %d", len(spy.stickyCalls))
+	}
+	call := spy.stickyCalls[0]
+	if call.group != "g1" || !call.cfg.Enabled || call.cfg.CookieName != "my_cookie" || call.cfg.TTL != 45*time.Minute {
+		t.Errorf("unexpected SetSticky call: %+v", call)
+	}
+}
+
+func TestHandler_StickySubmit_UncheckedCheckboxDisables(t *testing.T) {
+	srv, password, spy := newTestServerWithSpy(t)
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, password)
+	cookies, csrf := getAuthedCSRFAndCookies(t, handler, "/", session)
+
+	// "enabled" omitted entirely — mirrors an unchecked HTML checkbox.
+	form := url.Values{
+		"csrf_token":  {csrf},
+		"group":       {"g1"},
+		"cookie_name": {""},
+		"ttl_minutes": {""},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/sticky", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if len(spy.stickyCalls) != 1 || spy.stickyCalls[0].cfg.Enabled {
+		t.Errorf("expected sticky sessions to be disabled when 'enabled' is absent from the form, got %+v", spy.stickyCalls)
+	}
+}
+
+func TestHandler_StickySubmit_RequiresCSRF(t *testing.T) {
+	srv, password, spy := newTestServerWithSpy(t)
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, password)
+
+	form := url.Values{"group": {"g1"}, "enabled": {"on"}}
+	req := httptest.NewRequest(http.MethodPost, "/sticky", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(session)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if len(spy.stickyCalls) != 0 {
+		t.Errorf("expected no SetSticky call without a valid CSRF token, got %+v", spy.stickyCalls)
+	}
+}
+
+func TestHandler_StickySubmit_RequiresAuth(t *testing.T) {
+	srv, _, spy := newTestServerWithSpy(t)
+	handler := srv.Handler()
+
+	form := url.Values{"group": {"g1"}, "enabled": {"on"}}
+	req := httptest.NewRequest(http.MethodPost, "/sticky", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("expected an unauthenticated request to be redirected, got %d", rec.Code)
+	}
+	if len(spy.stickyCalls) != 0 {
+		t.Errorf("expected no SetSticky call without auth, got %+v", spy.stickyCalls)
 	}
 }

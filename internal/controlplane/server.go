@@ -65,6 +65,7 @@ type Server struct {
 	overrides  *OverrideStore
 	algorithms *AlgorithmStore
 	routes     *RouteStore
+	sticky     *StickyStore
 
 	mu   sync.Mutex
 	subs map[string]map[chan *pb.BackendSet]struct{} // group -> set of subscriber channels
@@ -86,11 +87,12 @@ type Server struct {
 }
 
 // NewServer creates a control plane server backed by the given provider.
-// overrides, algorithms, and routes may be nil, in which case manual
-// weight/drain overrides are disabled, every group uses
-// AlgorithmRoundRobin, and no L7 routes are configured (empty in-memory
-// stores are used instead so callers don't need nil checks everywhere).
-func NewServer(provider pool.Provider, overrides *OverrideStore, algorithms *AlgorithmStore, routes *RouteStore) *Server {
+// overrides, algorithms, routes, and sticky may be nil, in which case
+// manual weight/drain overrides are disabled, every group uses
+// AlgorithmRoundRobin, no L7 routes are configured, and sticky sessions
+// are disabled everywhere (empty in-memory stores are used instead so
+// callers don't need nil checks everywhere).
+func NewServer(provider pool.Provider, overrides *OverrideStore, algorithms *AlgorithmStore, routes *RouteStore, sticky *StickyStore) *Server {
 	if overrides == nil {
 		overrides = NewOverrideStore("")
 	}
@@ -100,11 +102,15 @@ func NewServer(provider pool.Provider, overrides *OverrideStore, algorithms *Alg
 	if routes == nil {
 		routes = NewRouteStore("")
 	}
+	if sticky == nil {
+		sticky = NewStickyStore("")
+	}
 	return &Server{
 		provider:   provider,
 		overrides:  overrides,
 		algorithms: algorithms,
 		routes:     routes,
+		sticky:     sticky,
 		subs:       make(map[string]map[chan *pb.BackendSet]struct{}),
 		last:       make(map[string]*pb.BackendSet),
 		health:     make(map[backendHealthKey]healthEntry),
@@ -185,6 +191,21 @@ func (s *Server) SetAlgorithm(ctx context.Context, group string, algorithm Algor
 	}
 	s.forceRepublish(ctx, group)
 	return nil
+}
+
+// SetSticky sets group's sticky-session configuration and immediately
+// re-publishes so connected data planes pick it up right away.
+func (s *Server) SetSticky(ctx context.Context, group string, cfg StickyConfig) error {
+	if err := s.sticky.Set(group, cfg); err != nil {
+		return err
+	}
+	s.forceRepublish(ctx, group)
+	return nil
+}
+
+// Sticky returns group's current sticky-session configuration.
+func (s *Server) Sticky(group string) StickyConfig {
+	return s.sticky.Get(group)
 }
 
 // SetRoutes replaces the entire L7 route table and immediately pushes it
@@ -291,7 +312,7 @@ func (s *Server) forceRepublish(ctx context.Context, group string) {
 	// always produce a visible update even if the resulting BackendSet
 	// happens to look identical to what a stale s.last already holds in
 	// an edge case (e.g. re-applying the same override value).
-	next := snapshotToBackendSet(group, snap, s.overrides.GroupOverrides(group), s.algorithms.Get(group))
+	next := snapshotToBackendSet(group, snap, s.overrides.GroupOverrides(group), s.algorithms.Get(group), s.sticky.Get(group))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -319,7 +340,7 @@ func (s *Server) forceRepublish(ctx context.Context, group string) {
 // this group and, if different, bumps the version and pushes it to every
 // currently-connected subscriber for that group.
 func (s *Server) publishIfChanged(group string, snap pool.Snapshot) {
-	next := snapshotToBackendSet(group, snap, s.overrides.GroupOverrides(group), s.algorithms.Get(group))
+	next := snapshotToBackendSet(group, snap, s.overrides.GroupOverrides(group), s.algorithms.Get(group), s.sticky.Get(group))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -547,6 +568,7 @@ type GroupState struct {
 	Backends        []BackendState
 	SubscriberCount int
 	Algorithm       Algorithm
+	Sticky          StickyConfig
 }
 
 // Snapshot returns a read-only view of every group's current backend set,
@@ -610,6 +632,7 @@ func (s *Server) Snapshot(ctx context.Context) []GroupState {
 			Backends:        backends,
 			SubscriberCount: subCount,
 			Algorithm:       s.algorithms.Get(group),
+			Sticky:          s.sticky.Get(group),
 		})
 	}
 	return states
@@ -661,9 +684,10 @@ func (s *Server) FleetSnapshot() []InstanceState {
 // applying any manual overrides on top: a drained backend is omitted
 // entirely (never sent to data planes, regardless of what the provider
 // reports), and an overridden weight replaces the provider's weight. The
-// group's currently selected load-balancing algorithm is included so data
-// planes apply it without a separate round-trip.
-func snapshotToBackendSet(group string, snap pool.Snapshot, overrides map[string]Override, algorithm Algorithm) *pb.BackendSet {
+// group's currently selected load-balancing algorithm and sticky-session
+// configuration are included so data planes apply both without a
+// separate round-trip.
+func snapshotToBackendSet(group string, snap pool.Snapshot, overrides map[string]Override, algorithm Algorithm, sticky StickyConfig) *pb.BackendSet {
 	backends := make([]*pb.Backend, 0, len(snap.Backends))
 	for _, b := range snap.Backends {
 		ov, hasOverride := overrides[b.Address]
@@ -677,7 +701,14 @@ func snapshotToBackendSet(group string, snap pool.Snapshot, overrides map[string
 		}
 		backends = append(backends, &pb.Backend{Address: b.Address, Weight: weight})
 	}
-	return &pb.BackendSet{Group: group, Backends: backends, Algorithm: string(algorithm)}
+	return &pb.BackendSet{
+		Group:            group,
+		Backends:         backends,
+		Algorithm:        string(algorithm),
+		Sticky:           sticky.Enabled,
+		StickyCookieName: sticky.effectiveCookieName(),
+		StickyTtlSeconds: int64(sticky.effectiveTTL().Seconds()),
+	}
 }
 
 // backendSetsEqual compares two backend sets by address+weight, ignoring

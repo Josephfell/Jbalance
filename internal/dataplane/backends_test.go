@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"testing"
+	"time"
 
 	pb "github.com/Josephfell/Jbalance/proto"
 )
@@ -420,5 +421,80 @@ func TestBackendList_ActiveConnsPreservedAcrossUpdate(t *testing.T) {
 	}
 	if next == busy {
 		t.Errorf("expected active-connection count for %s to be preserved across update (making it less preferred), but it was selected again immediately", busy)
+	}
+}
+
+func TestBackendList_Sticky_DefaultDisabled(t *testing.T) {
+	bl := NewBackendList()
+	if bl.Sticky().Enabled {
+		t.Error("expected sticky sessions to default to disabled")
+	}
+}
+
+func TestBackendList_Sticky_ParsedFromUpdate(t *testing.T) {
+	bl := NewBackendList()
+	bl.Update(&pb.BackendSet{
+		Group:            "test",
+		Version:          1,
+		Backends:         []*pb.Backend{{Address: "a:1", Weight: 1}},
+		Sticky:           true,
+		StickyCookieName: "my_cookie",
+		StickyTtlSeconds: 900,
+	})
+
+	sc := bl.Sticky()
+	if !sc.Enabled {
+		t.Error("expected sticky to be enabled")
+	}
+	if sc.CookieName != "my_cookie" {
+		t.Errorf("expected cookie name my_cookie, got %q", sc.CookieName)
+	}
+	if sc.TTL != 15*time.Minute {
+		t.Errorf("expected TTL 15m, got %v", sc.TTL)
+	}
+}
+
+func TestBackendList_PinTo_HealthyKnownAddress(t *testing.T) {
+	bl := NewBackendList()
+	bl.Update(&pb.BackendSet{Group: "test", Version: 1, Backends: []*pb.Backend{{Address: "a:1", Weight: 1}}})
+
+	if !bl.PinTo("a:1") {
+		t.Error("expected PinTo to succeed for a healthy, known address")
+	}
+}
+
+func TestBackendList_PinTo_UnhealthyAddressFails(t *testing.T) {
+	bl := NewBackendList()
+	bl.Update(&pb.BackendSet{Group: "test", Version: 1, Backends: []*pb.Backend{{Address: "a:1", Weight: 1}}})
+	bl.SetHealth("a:1", false)
+
+	if bl.PinTo("a:1") {
+		t.Error("expected PinTo to fail for an unhealthy address")
+	}
+}
+
+func TestBackendList_PinTo_UnknownAddressFails(t *testing.T) {
+	bl := NewBackendList()
+	bl.Update(&pb.BackendSet{Group: "test", Version: 1, Backends: []*pb.Backend{{Address: "a:1", Weight: 1}}})
+
+	if bl.PinTo("does-not-exist:1") {
+		t.Error("expected PinTo to fail for an address not in the group")
+	}
+}
+
+func TestBackendList_PinTo_IncrementsActiveConns(t *testing.T) {
+	bl := NewBackendList()
+	bl.Update(&pb.BackendSet{
+		Group: "test", Version: 1, Algorithm: "least_connections",
+		Backends: []*pb.Backend{{Address: "a:1", Weight: 1}, {Address: "b:1", Weight: 1}},
+	})
+
+	bl.PinTo("a:1")
+	bl.PinTo("a:1")
+
+	// With a:1 pinned twice, least_connections should now prefer b:1.
+	next, ok := bl.Next()
+	if !ok || next != "b:1" {
+		t.Errorf("expected PinTo to raise a:1's active-connection count enough that least_connections picks b:1 next, got %q", next)
 	}
 }

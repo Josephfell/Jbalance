@@ -158,3 +158,161 @@ func TestProxy_LazilyEnsuresGroupReferencedOnlyByARoute(t *testing.T) {
 		t.Errorf("expected the lazily-ensured api-tier group to serve the request, got %q", rec.Body.String())
 	}
 }
+
+func TestProxy_StickySessions_PinsToSameBackendAcrossRequests(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	addrA, cleanupA := newTestBackend(t, "a")
+	defer cleanupA()
+	addrB, cleanupB := newTestBackend(t, "b")
+	defer cleanupB()
+
+	routes := NewRouteTable("web-tier")
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{
+		Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2,
+	}, time.Hour)
+	groups.Ensure("web-tier").Update(&pb.BackendSet{
+		Group: "web-tier", Version: 1, Sticky: true, StickyCookieName: "jb_test",
+		Backends: []*pb.Backend{{Address: addrA, Weight: 1}, {Address: addrB, Weight: 1}},
+	})
+
+	proxy := NewProxy(routes, groups)
+	handler := proxy.Handler()
+
+	// First request: no cookie yet, gets pinned to whichever backend Next()
+	// selects, and the response sets the affinity cookie.
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, httptest.NewRequest(http.MethodGet, "/", nil))
+	first := rec1.Body.String()
+
+	var affinityCookie *http.Cookie
+	for _, c := range rec1.Result().Cookies() {
+		if c.Name == "jb_test" {
+			affinityCookie = c
+		}
+	}
+	if affinityCookie == nil {
+		t.Fatal("expected the first response to set an affinity cookie")
+	}
+
+	// Next several requests, carrying that cookie, must all hit the same
+	// backend regardless of what round-robin would otherwise pick.
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(affinityCookie)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Body.String() != first {
+			t.Fatalf("expected sticky session to pin every request to %q, got %q on request %d", first, rec.Body.String(), i)
+		}
+	}
+}
+
+func TestProxy_StickySessions_FallsBackWhenPinnedBackendUnhealthy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	addrA, cleanupA := newTestBackend(t, "a")
+	defer cleanupA()
+	addrB, cleanupB := newTestBackend(t, "b")
+	defer cleanupB()
+
+	routes := NewRouteTable("web-tier")
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{
+		Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2,
+	}, time.Hour)
+	backends := groups.Ensure("web-tier")
+	backends.Update(&pb.BackendSet{
+		Group: "web-tier", Version: 1, Sticky: true, StickyCookieName: "jb_test",
+		Backends: []*pb.Backend{{Address: addrA, Weight: 1}, {Address: addrB, Weight: 1}},
+	})
+
+	proxy := NewProxy(routes, groups)
+	handler := proxy.Handler()
+
+	// Pin to addrA explicitly via a forged cookie, then mark it unhealthy.
+	backends.SetHealth(addrA, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "jb_test", Value: addrA})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected the request to still succeed via fallback, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "b" {
+		t.Errorf("expected fallback to the only healthy backend (b), got %q", rec.Body.String())
+	}
+
+	// The response should now pin to addrB instead.
+	var newCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "jb_test" {
+			newCookie = c
+		}
+	}
+	if newCookie == nil || newCookie.Value != addrB {
+		t.Errorf("expected the affinity cookie to be updated to point at addrB, got %+v", newCookie)
+	}
+}
+
+func TestProxy_StickySessions_ForgedCookieCannotEscapeGroup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	addrA, cleanupA := newTestBackend(t, "a")
+	defer cleanupA()
+
+	routes := NewRouteTable("web-tier")
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{
+		Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2,
+	}, time.Hour)
+	groups.Ensure("web-tier").Update(&pb.BackendSet{
+		Group: "web-tier", Version: 1, Sticky: true, StickyCookieName: "jb_test",
+		Backends: []*pb.Backend{{Address: addrA, Weight: 1}},
+	})
+
+	proxy := NewProxy(routes, groups)
+	handler := proxy.Handler()
+
+	// A cookie naming an address that was never part of this group at all
+	// must not be trusted — PinTo should reject it and fall back to
+	// normal selection (the only real backend, addrA).
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "jb_test", Value: "10.0.0.99:9999"})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Body.String() != "a" {
+		t.Errorf("expected a forged cookie to be rejected and fall back to a real backend, got %q", rec.Body.String())
+	}
+}
+
+func TestProxy_NoStickyCookieSetWhenDisabled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	addr, cleanup := newTestBackend(t, "a")
+	defer cleanup()
+
+	routes := NewRouteTable("web-tier")
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{
+		Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2,
+	}, time.Hour)
+	groups.Ensure("web-tier").Update(&pb.BackendSet{
+		Group: "web-tier", Version: 1, // Sticky left false
+		Backends: []*pb.Backend{{Address: addr, Weight: 1}},
+	})
+
+	proxy := NewProxy(routes, groups)
+	rec := httptest.NewRecorder()
+	proxy.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "jb_affinity" || c.Name == "jb_test" {
+			t.Errorf("expected no affinity cookie to be set when sticky sessions are disabled, got %+v", c)
+		}
+	}
+}

@@ -29,6 +29,16 @@ type backendEntry struct {
 	activeConns atomic.Int64 // outstanding requests currently proxied to this backend
 }
 
+// StickyConfig mirrors the sticky-session fields the control plane
+// attaches to a BackendSet — kept as a small local struct (rather than
+// reading pb fields directly everywhere) so BackendList's public surface
+// doesn't leak the wire type.
+type StickyConfig struct {
+	Enabled    bool
+	CookieName string
+	TTL        time.Duration
+}
+
 // BackendList holds the current set of backends for one group and
 // provides thread-safe backend selection over the currently healthy
 // subset, using whichever Algorithm the control plane has most recently
@@ -41,6 +51,7 @@ type BackendList struct {
 	entries   []*backendEntry
 	version   int64
 	algorithm Algorithm
+	sticky    StickyConfig
 	next      atomic.Uint64 // round-robin cursor into the expanded healthy-slot list
 	slots     []int         // expanded index list into entries, healthy backends only, respecting weight
 	rng       *rand.Rand
@@ -107,6 +118,11 @@ func (b *BackendList) Update(set *pb.BackendSet) {
 	b.entries = entries
 	b.version = set.Version
 	b.algorithm = normalizeAlgorithm(set.Algorithm)
+	b.sticky = StickyConfig{
+		Enabled:    set.Sticky,
+		CookieName: set.StickyCookieName,
+		TTL:        time.Duration(set.StickyTtlSeconds) * time.Second,
+	}
 	b.rebuildSlotsLocked()
 }
 
@@ -287,6 +303,36 @@ func (b *BackendList) Algorithm() Algorithm {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.algorithm
+}
+
+// Sticky returns the group's currently configured sticky-session
+// settings.
+func (b *BackendList) Sticky() StickyConfig {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.sticky
+}
+
+// PinTo increments address's active-connection counter without going
+// through the normal selection algorithm, and reports whether address is
+// currently a healthy, known member of this list — used when a sticky
+// session's cookie names a backend the caller wants to keep using rather
+// than picking a new one via Next(). Returns false (and does not
+// increment anything) if address is unhealthy or unknown, so the caller
+// can fall back to Next() instead.
+func (b *BackendList) PinTo(address string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for _, e := range b.entries {
+		if e.address == address {
+			if !e.healthy {
+				return false
+			}
+			e.activeConns.Add(1)
+			return true
+		}
+	}
+	return false
 }
 
 // Len returns the current number of distinct backends (healthy or not, not

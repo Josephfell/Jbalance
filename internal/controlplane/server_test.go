@@ -64,7 +64,7 @@ func TestBackendSetsEqual(t *testing.T) {
 }
 
 func TestServer_PublishesOnlyOnChange(t *testing.T) {
-	srv := NewServer(nil, nil, nil, nil) // provider unused directly in this test — publishIfChanged doesn't touch it
+	srv := NewServer(nil, nil, nil, nil, nil) // provider unused directly in this test — publishIfChanged doesn't touch it
 
 	snap1 := pool.Snapshot{Group: "g1", Backends: []pool.Backend{{Address: "a:1", Weight: 1}}}
 	srv.publishIfChanged("g1", snap1)
@@ -88,7 +88,7 @@ func TestServer_PublishesOnlyOnChange(t *testing.T) {
 }
 
 func TestServer_StreamBackendsDeliversUpdates(t *testing.T) {
-	srv := NewServer(nil, nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil, nil)
 
 	ch := make(chan *pb.BackendSet, 4)
 	srv.subscribe("g1", ch)
@@ -114,7 +114,7 @@ func TestServer_SetOverride_DrainExcludesFromPublishedSetButNotSnapshot(t *testi
 			"g1": {Group: "g1", Backends: []pool.Backend{{Address: "a:1", Weight: 1}, {Address: "b:1", Weight: 1}}},
 		},
 	}
-	srv := NewServer(provider, nil, nil, nil)
+	srv := NewServer(provider, nil, nil, nil, nil)
 	srv.publishIfChanged("g1", provider.snapshots["g1"])
 
 	ctx := context.Background()
@@ -159,7 +159,7 @@ func TestServer_SetOverride_WeightOverrideAppliesToPublishedSet(t *testing.T) {
 			"g1": {Group: "g1", Backends: []pool.Backend{{Address: "a:1", Weight: 1}}},
 		},
 	}
-	srv := NewServer(provider, nil, nil, nil)
+	srv := NewServer(provider, nil, nil, nil, nil)
 	srv.publishIfChanged("g1", provider.snapshots["g1"])
 
 	ctx := context.Background()
@@ -183,7 +183,7 @@ func TestServer_ClearOverride_RestoresProviderWeight(t *testing.T) {
 			"g1": {Group: "g1", Backends: []pool.Backend{{Address: "a:1", Weight: 1}}},
 		},
 	}
-	srv := NewServer(provider, nil, nil, nil)
+	srv := NewServer(provider, nil, nil, nil, nil)
 	srv.publishIfChanged("g1", provider.snapshots["g1"])
 
 	ctx := context.Background()
@@ -209,7 +209,7 @@ func TestServer_SetAlgorithm_UpdatesSnapshotAndPublishedSet(t *testing.T) {
 			"g1": {Group: "g1", Backends: []pool.Backend{{Address: "a:1", Weight: 1}}},
 		},
 	}
-	srv := NewServer(provider, nil, nil, nil)
+	srv := NewServer(provider, nil, nil, nil, nil)
 	srv.publishIfChanged("g1", provider.snapshots["g1"])
 
 	ctx := context.Background()
@@ -232,7 +232,7 @@ func TestServer_SetAlgorithm_UpdatesSnapshotAndPublishedSet(t *testing.T) {
 
 func TestServer_SetAlgorithm_RejectsInvalidAlgorithm(t *testing.T) {
 	provider := &stubProvider{groups: []string{"g1"}, snapshots: map[string]pool.Snapshot{"g1": {Group: "g1"}}}
-	srv := NewServer(provider, nil, nil, nil)
+	srv := NewServer(provider, nil, nil, nil, nil)
 
 	if err := srv.SetAlgorithm(context.Background(), "g1", Algorithm("bogus")); err == nil {
 		t.Error("expected an error for an invalid algorithm")
@@ -246,7 +246,7 @@ func TestServer_ForceRepublish_BumpsVersionEvenIfSetLooksUnchanged(t *testing.T)
 			"g1": {Group: "g1", Backends: []pool.Backend{{Address: "a:1", Weight: 1}}},
 		},
 	}
-	srv := NewServer(provider, nil, nil, nil)
+	srv := NewServer(provider, nil, nil, nil, nil)
 	srv.publishIfChanged("g1", provider.snapshots["g1"])
 
 	v1 := srv.last["g1"].Version
@@ -265,14 +265,14 @@ func TestServer_ForceRepublish_BumpsVersionEvenIfSetLooksUnchanged(t *testing.T)
 }
 
 func TestServer_FleetSnapshot_EmptyBeforeAnyConnection(t *testing.T) {
-	srv := NewServer(nil, nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil, nil)
 	if got := srv.FleetSnapshot(); len(got) != 0 {
 		t.Errorf("expected an empty fleet before any instance connects, got %v", got)
 	}
 }
 
 func TestServer_FleetSnapshot_ReflectsConnectAndDisconnect(t *testing.T) {
-	srv := NewServer(nil, nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil, nil)
 
 	srv.markInstanceConnected("dp-1", "web-tier")
 	fleet := srv.FleetSnapshot()
@@ -294,7 +294,7 @@ func TestServer_FleetSnapshot_ReflectsConnectAndDisconnect(t *testing.T) {
 }
 
 func TestServer_FleetSnapshot_IgnoresEmptyInstanceID(t *testing.T) {
-	srv := NewServer(nil, nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil, nil)
 	srv.markInstanceConnected("", "web-tier")
 	srv.markInstanceDisconnected("")
 	srv.recordInstanceHealthReport("", 3, time.Now())
@@ -305,7 +305,7 @@ func TestServer_FleetSnapshot_IgnoresEmptyInstanceID(t *testing.T) {
 }
 
 func TestServer_FleetSnapshot_ReconnectOverwritesPriorEntry(t *testing.T) {
-	srv := NewServer(nil, nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil, nil)
 	srv.markInstanceConnected("dp-1", "web-tier")
 	srv.markInstanceDisconnected("dp-1")
 
@@ -320,7 +320,7 @@ func TestServer_FleetSnapshot_ReconnectOverwritesPriorEntry(t *testing.T) {
 }
 
 func TestServer_FleetSnapshot_HealthReportUpdatesExistingEntry(t *testing.T) {
-	srv := NewServer(nil, nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil, nil)
 	srv.markInstanceConnected("dp-1", "web-tier")
 
 	now := time.Now()
@@ -339,7 +339,7 @@ func TestServer_FleetSnapshot_HealthReportUpdatesExistingEntry(t *testing.T) {
 }
 
 func TestServer_FleetSnapshot_HealthReportWithoutStreamIsNoop(t *testing.T) {
-	srv := NewServer(nil, nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil, nil)
 	// No markInstanceConnected call — a health report for an instance
 	// with no fleet entry yet should not fabricate one.
 	srv.recordInstanceHealthReport("dp-ghost", 2, time.Now())
@@ -350,7 +350,7 @@ func TestServer_FleetSnapshot_HealthReportWithoutStreamIsNoop(t *testing.T) {
 }
 
 func TestServer_FleetSnapshot_SortedByInstanceID(t *testing.T) {
-	srv := NewServer(nil, nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil, nil)
 	srv.markInstanceConnected("dp-3", "web-tier")
 	srv.markInstanceConnected("dp-1", "web-tier")
 	srv.markInstanceConnected("dp-2", "web-tier")
@@ -369,7 +369,7 @@ func TestServer_FleetSnapshot_SortedByInstanceID(t *testing.T) {
 }
 
 func TestServer_SetRoutes_PublishesToSubscribers(t *testing.T) {
-	srv := NewServer(nil, nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil, nil)
 
 	ch := make(chan *pb.RouteTable, 4)
 	srv.routeSubsMu.Lock()
@@ -395,7 +395,7 @@ func TestServer_SetRoutes_PublishesToSubscribers(t *testing.T) {
 }
 
 func TestServer_Routes_ReflectsSetRoutes(t *testing.T) {
-	srv := NewServer(nil, nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil, nil)
 	routes := []Route{
 		{Host: "acme.io", PathPrefix: "/static/", TargetGroup: "static-edge"},
 		{PathPrefix: "/", TargetGroup: "web-tier"},
@@ -414,7 +414,7 @@ func TestServer_Routes_ReflectsSetRoutes(t *testing.T) {
 }
 
 func TestServer_StreamRoutes_DeliversCurrentTableImmediately(t *testing.T) {
-	srv := NewServer(nil, nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil, nil)
 	_ = srv.SetRoutes([]Route{{PathPrefix: "/", TargetGroup: "web-tier"}})
 
 	srv.routeSubsMu.Lock()
@@ -426,5 +426,42 @@ func TestServer_StreamRoutes_DeliversCurrentTableImmediately(t *testing.T) {
 	}
 	if len(current.Routes) != 1 || current.Routes[0].TargetGroup != "web-tier" {
 		t.Errorf("unexpected lastRoutes content: %+v", current)
+	}
+}
+
+func TestServer_SetSticky_UpdatesPublishedSetAndSnapshot(t *testing.T) {
+	provider := &stubProvider{
+		groups: []string{"g1"},
+		snapshots: map[string]pool.Snapshot{
+			"g1": {Group: "g1", Backends: []pool.Backend{{Address: "a:1", Weight: 1}}},
+		},
+	}
+	srv := NewServer(provider, nil, nil, nil, nil)
+	srv.publishIfChanged("g1", provider.snapshots["g1"])
+
+	ctx := context.Background()
+	cfg := StickyConfig{Enabled: true, CookieName: "jb_test", TTL: 20 * time.Minute}
+	if err := srv.SetSticky(ctx, "g1", cfg); err != nil {
+		t.Fatalf("SetSticky() error: %v", err)
+	}
+
+	srv.mu.Lock()
+	published := srv.last["g1"]
+	srv.mu.Unlock()
+	if !published.Sticky || published.StickyCookieName != "jb_test" || published.StickyTtlSeconds != 1200 {
+		t.Errorf("expected published sticky fields to reflect SetSticky, got sticky=%v cookie=%q ttl=%d",
+			published.Sticky, published.StickyCookieName, published.StickyTtlSeconds)
+	}
+
+	states := srv.Snapshot(ctx)
+	if len(states) != 1 || !states[0].Sticky.Enabled || states[0].Sticky.CookieName != "jb_test" {
+		t.Errorf("expected snapshot to reflect the new sticky config, got %+v", states)
+	}
+}
+
+func TestServer_Sticky_DefaultsToDisabled(t *testing.T) {
+	srv := NewServer(nil, nil, nil, nil, nil)
+	if srv.Sticky("g1").Enabled {
+		t.Error("expected an unconfigured group's sticky config to default to disabled")
 	}
 }

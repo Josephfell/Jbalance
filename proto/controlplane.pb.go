@@ -143,9 +143,22 @@ type BackendSet struct {
 	// these backends: "round_robin" (default, weighted), "least_connections"
 	// (weighted by outstanding request count), or "random" (weighted).
 	// Unset/unrecognised values fall back to round_robin.
-	Algorithm     string `protobuf:"bytes,4,opt,name=algorithm,proto3" json:"algorithm,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Algorithm string `protobuf:"bytes,4,opt,name=algorithm,proto3" json:"algorithm,omitempty"`
+	// Whether cookie-based session affinity is enabled for this group. When
+	// true, the data plane pins a client to whichever backend it was last
+	// routed to (via sticky_cookie_name) as long as that backend remains
+	// healthy and part of the group, falling back to the normal algorithm
+	// otherwise.
+	Sticky bool `protobuf:"varint,5,opt,name=sticky,proto3" json:"sticky,omitempty"`
+	// Name of the cookie used to carry session affinity. Only meaningful
+	// when sticky is true; the data plane applies a default if unset.
+	StickyCookieName string `protobuf:"bytes,6,opt,name=sticky_cookie_name,json=stickyCookieName,proto3" json:"sticky_cookie_name,omitempty"`
+	// How long the affinity cookie should live, refreshed on every request
+	// it's used for. Only meaningful when sticky is true; the data plane
+	// applies a default if unset/zero.
+	StickyTtlSeconds int64 `protobuf:"varint,7,opt,name=sticky_ttl_seconds,json=stickyTtlSeconds,proto3" json:"sticky_ttl_seconds,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *BackendSet) Reset() {
@@ -204,6 +217,27 @@ func (x *BackendSet) GetAlgorithm() string {
 		return x.Algorithm
 	}
 	return ""
+}
+
+func (x *BackendSet) GetSticky() bool {
+	if x != nil {
+		return x.Sticky
+	}
+	return false
+}
+
+func (x *BackendSet) GetStickyCookieName() string {
+	if x != nil {
+		return x.StickyCookieName
+	}
+	return ""
+}
+
+func (x *BackendSet) GetStickyTtlSeconds() int64 {
+	if x != nil {
+		return x.StickyTtlSeconds
+	}
+	return 0
 }
 
 type BackendHealth struct {
@@ -555,13 +589,16 @@ const file_proto_controlplane_proto_rawDesc = "" +
 	"instanceId\";\n" +
 	"\aBackend\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x16\n" +
-	"\x06weight\x18\x02 \x01(\x05R\x06weight\"\x8d\x01\n" +
+	"\x06weight\x18\x02 \x01(\x05R\x06weight\"\x81\x02\n" +
 	"\n" +
 	"BackendSet\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x121\n" +
 	"\bbackends\x18\x02 \x03(\v2\x15.controlplane.BackendR\bbackends\x12\x18\n" +
 	"\aversion\x18\x03 \x01(\x03R\aversion\x12\x1c\n" +
-	"\talgorithm\x18\x04 \x01(\tR\talgorithm\"C\n" +
+	"\talgorithm\x18\x04 \x01(\tR\talgorithm\x12\x16\n" +
+	"\x06sticky\x18\x05 \x01(\bR\x06sticky\x12,\n" +
+	"\x12sticky_cookie_name\x18\x06 \x01(\tR\x10stickyCookieName\x12,\n" +
+	"\x12sticky_ttl_seconds\x18\a \x01(\x03R\x10stickyTtlSeconds\"C\n" +
 	"\rBackendHealth\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x18\n" +
 	"\ahealthy\x18\x02 \x01(\bR\ahealthy\"~\n" +

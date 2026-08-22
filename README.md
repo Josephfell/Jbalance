@@ -253,6 +253,50 @@ Fleet view; noted as a follow-up rather than blocking this feature, since
 it's a display-only gap and doesn't affect actual routing/proxying
 behavior.
 
+## Sticky sessions
+
+By default, every load-balancing algorithm (round robin, least
+connections, random) picks a backend independently per request — nothing
+ties a client to the same backend across multiple requests. **Sticky
+sessions**, configurable per group from the dashboard, changes that: once
+enabled for a group, the data plane pins each client to whichever backend
+it was first sent to, via a cookie, and keeps sending that client's
+subsequent requests to the same backend as long as it stays healthy.
+
+Per-group settings:
+- **Enabled** — on/off. Disabled by default, and disabling it takes
+  effect immediately for new requests (existing affinity cookies simply
+  stop being honoured).
+- **Cookie name** — defaults to `jb_affinity` if left blank.
+- **TTL** — how long the affinity cookie lives, refreshed on every
+  request that uses it. Defaults to 30 minutes if left blank or zero.
+
+**Failover behavior:** if a client's pinned backend becomes unhealthy or
+is removed from the group entirely, the very next request from that
+client falls back to the group's normal load-balancing algorithm and the
+client is re-pinned to whatever backend that selects — a client is never
+stuck failing because its original backend went away.
+
+**How pinning works:** the affinity cookie's value is the backend's own
+address. This is deliberately simple, with a real (if minor) tradeoff:
+the client can see the internal address of the backend it's pinned to.
+Forging or tampering with the cookie value can't route a client to an
+address outside the group, though — every incoming cookie value is
+checked against the group's actual current healthy backend list before
+being honoured, and anything else falls back to normal selection.
+
+Like the load-balancing algorithm, sticky-session configuration is
+pushed to every data plane instance as part of its `BackendSet` update —
+no separate round trip, no data plane restart required. Stored in a
+local JSON file (`-admin-sticky-path`, default
+`/var/lib/go-loadbalancer/sticky.json`), same pattern as the other
+per-group settings.
+
+**Interaction with L7 routing:** sticky sessions are configured per
+*backend group*, not per route. If a route table sends different
+requests from the same client to different groups, each group's affinity
+(if enabled) is tracked independently via its own cookie.
+
 ## Azure VMSS provider
 
 A real backend pool provider is included: `pool.AzureVMSSProvider` reports

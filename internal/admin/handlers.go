@@ -28,6 +28,7 @@ type StateProvider interface {
 	FleetSnapshot() []controlplane.InstanceState
 	Routes() []controlplane.Route
 	SetRoutes(routes []controlplane.Route) error
+	SetSticky(ctx context.Context, group string, cfg controlplane.StickyConfig) error
 }
 
 // Server serves the admin web management interface: a password-protected
@@ -103,6 +104,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /", s.requireAuth(s.handleDashboard))
 	mux.HandleFunc("POST /override", s.requireAuth(s.handleOverrideSubmit))
 	mux.HandleFunc("POST /algorithm", s.requireAuth(s.handleAlgorithmSubmit))
+	mux.HandleFunc("POST /sticky", s.requireAuth(s.handleStickySubmit))
 	mux.HandleFunc("GET /password", s.requireAuth(s.handlePasswordPage))
 	mux.HandleFunc("POST /password", s.requireAuth(s.handlePasswordSubmit))
 	mux.HandleFunc("GET /audit", s.requireAuth(s.handleAuditPage))
@@ -129,7 +131,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	s.render(w, "login", map[string]any{"CSRFToken": s.newCSRFToken(w)})
+	s.render(w, "login", map[string]any{"CSRFToken": s.csrfToken(w, r)})
 }
 
 func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
@@ -139,12 +141,15 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		s.audit.Record(AuditLoginRateLimited, ip, "login attempt blocked by rate limiting")
 		s.render(w, "login", map[string]any{
 			"Error":     "Too many failed attempts. Try again in a few minutes.",
-			"CSRFToken": s.newCSRFToken(w),
+			"CSRFToken": s.csrfToken(w, r),
 		})
 		return
 	}
 
 	if !s.checkCSRF(r) {
+		// The submitted token genuinely didn't match — mint a fresh one
+		// rather than reusing r's (which is exactly the mismatched/absent
+		// one that just failed) so the re-rendered form is submittable.
 		s.render(w, "login", map[string]any{"Error": "Session expired, please try again.", "CSRFToken": s.newCSRFToken(w)})
 		return
 	}
@@ -153,7 +158,7 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	if !s.store.VerifyPassword(password) {
 		s.limiter.RecordFailure(ip)
 		s.audit.Record(AuditLoginFailure, ip, "incorrect password")
-		s.render(w, "login", map[string]any{"Error": "Incorrect password.", "CSRFToken": s.newCSRFToken(w)})
+		s.render(w, "login", map[string]any{"Error": "Incorrect password.", "CSRFToken": s.csrfToken(w, r)})
 		return
 	}
 
@@ -172,7 +177,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "dashboard", map[string]any{
 		"Groups":          s.state.Snapshot(r.Context()),
-		"CSRFToken":       s.newCSRFToken(w),
+		"CSRFToken":       s.csrfToken(w, r),
 		"ValidAlgorithms": controlplane.ValidAlgorithms,
 	})
 }
@@ -257,6 +262,48 @@ func (s *Server) handleAlgorithmSubmit(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// handleStickySubmit handles enabling/disabling sticky sessions for a
+// group, and updating its cookie name / TTL, then redirects back to the
+// dashboard. A single endpoint (rather than separate enable/disable
+// routes) since every field belongs to the same group's config and
+// shares the same auth/CSRF handling.
+//
+// "enabled" is a checkbox: HTML omits an unchecked checkbox from the
+// submitted form entirely, so its presence (not its value) is what's
+// checked — there's no "false" value to read.
+func (s *Server) handleStickySubmit(w http.ResponseWriter, r *http.Request) {
+	if !s.checkCSRF(r) {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	group := r.FormValue("group")
+	if group == "" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	cfg := controlplane.StickyConfig{
+		Enabled:    r.FormValue("enabled") == "on",
+		CookieName: strings.TrimSpace(r.FormValue("cookie_name")),
+	}
+	if ttlMinutes, err := strconv.Atoi(strings.TrimSpace(r.FormValue("ttl_minutes"))); err == nil && ttlMinutes > 0 {
+		cfg.TTL = time.Duration(ttlMinutes) * time.Minute
+	}
+
+	if err := s.state.SetSticky(r.Context(), group, cfg); err != nil {
+		s.audit.Record(AuditStickyChanged, s.clientIP(r), "sticky session change failed for group "+group+": "+err.Error())
+	} else {
+		state := "disabled"
+		if cfg.Enabled {
+			state = "enabled"
+		}
+		s.audit.Record(AuditStickyChanged, s.clientIP(r), "sticky sessions "+state+" for group "+group)
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 func (s *Server) handleAuditPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "audit", map[string]any{"Entries": s.audit.Recent(200)})
 }
@@ -326,7 +373,7 @@ func (s *Server) handleRoutesPage(w http.ResponseWriter, r *http.Request) {
 		// (e.g. escaping quotes) inside the inline <script> block.
 		"Groups":     groupNames,
 		"GroupsJSON": template.JS(groupsJSON), //nolint:gosec // groupNames originates from Snapshot()'s own group names, not user input
-		"CSRFToken":  s.newCSRFToken(w),
+		"CSRFToken":  s.csrfToken(w, r),
 		"NextOrder":  len(routes),
 	})
 }
@@ -480,11 +527,13 @@ func formatDuration(d time.Duration) string {
 }
 
 func (s *Server) handlePasswordPage(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "password", map[string]any{"CSRFToken": s.newCSRFToken(w)})
+	s.render(w, "password", map[string]any{"CSRFToken": s.csrfToken(w, r)})
 }
 
 func (s *Server) handlePasswordSubmit(w http.ResponseWriter, r *http.Request) {
 	if !s.checkCSRF(r) {
+		// As in handleLoginSubmit: the existing token just failed
+		// validation, so mint a fresh one rather than reusing it.
 		s.render(w, "password", map[string]any{"Error": "Session expired, please try again.", "CSRFToken": s.newCSRFToken(w)})
 		return
 	}
@@ -494,20 +543,20 @@ func (s *Server) handlePasswordSubmit(w http.ResponseWriter, r *http.Request) {
 	confirm := r.FormValue("confirm_password")
 
 	if !s.store.VerifyPassword(current) {
-		s.render(w, "password", map[string]any{"Error": "Current password is incorrect.", "CSRFToken": s.newCSRFToken(w)})
+		s.render(w, "password", map[string]any{"Error": "Current password is incorrect.", "CSRFToken": s.csrfToken(w, r)})
 		return
 	}
 	if len(newPassword) < 12 {
-		s.render(w, "password", map[string]any{"Error": "New password must be at least 12 characters.", "CSRFToken": s.newCSRFToken(w)})
+		s.render(w, "password", map[string]any{"Error": "New password must be at least 12 characters.", "CSRFToken": s.csrfToken(w, r)})
 		return
 	}
 	if newPassword != confirm {
-		s.render(w, "password", map[string]any{"Error": "New password and confirmation do not match.", "CSRFToken": s.newCSRFToken(w)})
+		s.render(w, "password", map[string]any{"Error": "New password and confirmation do not match.", "CSRFToken": s.csrfToken(w, r)})
 		return
 	}
 
 	if err := s.store.SetPassword(newPassword); err != nil {
-		s.render(w, "password", map[string]any{"Error": "Failed to save new password. Check container logs.", "CSRFToken": s.newCSRFToken(w)})
+		s.render(w, "password", map[string]any{"Error": "Failed to save new password. Check container logs.", "CSRFToken": s.csrfToken(w, r)})
 		return
 	}
 
@@ -537,6 +586,34 @@ func (s *Server) render(w http.ResponseWriter, name string, data map[string]any)
 
 const csrfCookieName = "lb_admin_csrf"
 
+// csrfToken returns the CSRF token to embed in a rendered form, reusing
+// the token from an existing valid cookie on r if one is present, rather
+// than always minting a fresh one.
+//
+// This matters because every GET page handler renders a form and used to
+// call a "always mint a new cookie" version of this unconditionally: any
+// other request sharing the same cookie jar — a favicon fetch, a browser
+// prefetch, a second tab open to the same page, anything hitting a
+// requireAuth-protected route while unauthenticated (which redirects to
+// GET /login, re-rendering the exact page that mints a token) — would
+// silently overwrite the cookie the visible page's form still
+// references, since cookies are scoped to the browser's cookie jar for
+// the domain, not to one particular page load. The user would then see
+// "Session expired" on a form they never actually left. Reusing a
+// still-valid token when one exists closes that race without weakening
+// anything: a token is still rotated on every fresh (no-cookie) page
+// load and expires after 10 minutes either way.
+func (s *Server) csrfToken(w http.ResponseWriter, r *http.Request) string {
+	if cookie, err := r.Cookie(csrfCookieName); err == nil && cookie.Value != "" {
+		return cookie.Value
+	}
+	return s.newCSRFToken(w)
+}
+
+// newCSRFToken unconditionally mints and sets a fresh CSRF cookie.
+// Exported behavior lives in csrfToken above; call this directly only
+// when a genuinely new token is required (e.g. after CSRF validation
+// itself failed and the existing token must be considered burned).
 func (s *Server) newCSRFToken(w http.ResponseWriter) string {
 	buf := make([]byte, 24)
 	_, _ = rand.Read(buf) // crypto/rand.Read only errors if the OS RNG is broken; nothing sensible to do but proceed

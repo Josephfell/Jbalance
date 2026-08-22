@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"time"
 )
 
 // Proxy is an L7 HTTP reverse proxy that, for every incoming request,
@@ -55,27 +56,99 @@ func NewProxy(routes *RouteTable, groups *GroupManager) *Proxy {
 }
 
 // Handler returns an http.Handler that resolves each request's target
-// backend group via the route table, then proxies to the next selected
-// backend within that group. Returns 503 if no backends are currently
-// available for the resolved group.
+// backend group via the route table, then proxies to a backend within
+// that group — honouring cookie-based session affinity if the group has
+// it enabled, otherwise using the group's normal load-balancing
+// algorithm. Returns 503 if no backends are currently available for the
+// resolved group.
 func (p *Proxy) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		group := p.routes.Resolve(r.Host, r.URL.Path, r.Method)
 		backends := p.groups.Ensure(group)
 
-		addr, ok := backends.Next()
+		addr, ok := selectBackend(w, r, backends)
 		if !ok {
 			http.Error(w, "no healthy backends available", http.StatusServiceUnavailable)
 			return
 		}
-		// Next() has already incremented this backend's active-connection
-		// counter; release it once the proxied request (including
-		// streaming the response back to the client) has fully completed,
-		// so least_connections reflects real in-flight load rather than
-		// only ever growing.
+		// Either path through selectBackend has already incremented this
+		// backend's active-connection counter (Next() directly, or PinTo()
+		// on the sticky path); release it once the proxied request
+		// (including streaming the response back to the client) has fully
+		// completed, so least_connections reflects real in-flight load
+		// rather than only ever growing.
 		defer backends.Release(addr)
 
 		ctx := contextWithBackendAddr(r.Context(), addr)
 		p.rp.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// selectBackend picks the backend to proxy this request to: if the group
+// has sticky sessions enabled and the request carries a valid,
+// still-healthy affinity cookie, that pinned backend is reused (refreshing
+// the cookie's TTL); otherwise a new backend is chosen via the group's
+// normal algorithm and, if sticky sessions are enabled, pinned by setting
+// the affinity cookie on the response for subsequent requests to reuse.
+//
+// The cookie's value is the backend's own address (e.g. "10.2.1.14:8080")
+// rather than an opaque token — deliberately simple, at the cost of
+// revealing an internal backend address to the client that holds the
+// cookie. This is a real (if minor) information disclosure tradeoff:
+// resolving it properly would mean each data plane instance maintaining a
+// server-side token->address mapping, which is state this proxy
+// otherwise has none of (every data plane instance can restart
+// independently with zero session loss beyond backend health/counters).
+// Tampering isn't a meaningful risk either way: PinTo validates the
+// cookie's value against the group's actual healthy backend list before
+// honouring it, so a forged value can only ever resolve to a backend
+// that's already a legitimate member of the group, never an arbitrary
+// address.
+func selectBackend(w http.ResponseWriter, r *http.Request, backends *BackendList) (string, bool) {
+	sticky := backends.Sticky()
+	if !sticky.Enabled {
+		return backends.Next()
+	}
+
+	cookieName := sticky.CookieName
+	if cookieName == "" {
+		cookieName = "jb_affinity"
+	}
+
+	if cookie, err := r.Cookie(cookieName); err == nil && cookie.Value != "" {
+		if backends.PinTo(cookie.Value) {
+			setAffinityCookie(w, cookieName, cookie.Value, sticky.TTL)
+			return cookie.Value, true
+		}
+		// The pinned backend is gone or unhealthy — fall through to
+		// normal selection and pin the client to whatever's chosen next,
+		// rather than failing the request outright.
+	}
+
+	addr, ok := backends.Next()
+	if !ok {
+		return "", false
+	}
+	setAffinityCookie(w, cookieName, addr, sticky.TTL)
+	return addr, true
+}
+
+// setAffinityCookie sets (or refreshes) the sticky-session cookie
+// pinning the client to addr. HttpOnly since this cookie carries a
+// backend address, not something client-side script has any legitimate
+// reason to read; SameSite=Lax rather than Strict since a cross-site
+// navigation into a proxied application is a normal, unremarkable case
+// that affinity shouldn't break.
+func setAffinityCookie(w http.ResponseWriter, cookieName, addr string, ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = 30 * time.Minute
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieName,
+		Value:    addr,
+		Path:     "/",
+		MaxAge:   int(ttl.Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
 	})
 }

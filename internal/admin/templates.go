@@ -179,6 +179,15 @@ const templatesSource = `
   .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
   .field label { font-size: 11.5px; color: var(--text-muted); }
   .algo-select { font-size: 12.5px; padding: 6px 8px; }
+  .sticky-row {
+    display: flex; align-items: center; gap: 16px; padding: 10px 14px;
+    border-bottom: 1px solid var(--border); flex-wrap: wrap;
+  }
+  .sticky-toggle { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-muted); cursor: pointer; }
+  .sticky-toggle input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+  .sticky-field { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-faint); }
+  .sticky-input { font-size: 12px; padding: 5px 7px; }
+  .sticky-input--narrow { width: 64px; }
 
   .error {
     background: color-mix(in srgb, var(--down) 12%, transparent); border: 1px solid color-mix(in srgb, var(--down) 35%, transparent);
@@ -334,6 +343,23 @@ const templatesSource = `
                 <button type="submit" class="btn">Apply</button>
               </form>
             </div>
+            <form method="post" action="/sticky" class="sticky-row">
+              <input type="hidden" name="csrf_token" value="{{$csrf}}">
+              <input type="hidden" name="group" value="{{$group}}">
+              <label class="sticky-toggle">
+                <input type="checkbox" name="enabled" {{if .Sticky.Enabled}}checked{{end}}>
+                <span>Sticky sessions</span>
+              </label>
+              <label class="sticky-field">
+                <span>cookie</span>
+                <input type="text" name="cookie_name" value="{{.Sticky.CookieDisplayName}}" class="sticky-input">
+              </label>
+              <label class="sticky-field">
+                <span>TTL (min)</span>
+                <input type="number" name="ttl_minutes" value="{{.Sticky.TTLMinutes}}" min="1" placeholder="30" class="sticky-input sticky-input--narrow">
+              </label>
+              <button type="submit" class="btn">Save</button>
+            </form>
             {{if .Backends}}
             <table class="table">
               <tr><th>Address</th><th>Weight</th><th>Health</th><th>Actions</th></tr>

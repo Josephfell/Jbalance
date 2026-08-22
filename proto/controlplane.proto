@@ -58,6 +58,19 @@ message BackendSet {
   // (weighted by outstanding request count), or "random" (weighted).
   // Unset/unrecognised values fall back to round_robin.
   string algorithm = 4;
+  // Whether cookie-based session affinity is enabled for this group. When
+  // true, the data plane pins a client to whichever backend it was last
+  // routed to (via sticky_cookie_name) as long as that backend remains
+  // healthy and part of the group, falling back to the normal algorithm
+  // otherwise.
+  bool sticky = 5;
+  // Name of the cookie used to carry session affinity. Only meaningful
+  // when sticky is true; the data plane applies a default if unset.
+  string sticky_cookie_name = 6;
+  // How long the affinity cookie should live, refreshed on every request
+  // it's used for. Only meaningful when sticky is true; the data plane
+  // applies a default if unset/zero.
+  int64 sticky_ttl_seconds = 7;
 }
 
 message BackendHealth {
