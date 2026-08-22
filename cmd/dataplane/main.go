@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -69,21 +70,25 @@ func main() {
 		log.Println("dataplane: WARNING connecting to control plane without TLS — use -control-plane-tls outside of local development.")
 	}
 
-	backends := dataplane.NewBackendList()
-	sub := dataplane.NewSubscriber(*controlPlaneAddr, *group, id, backends, cpTLSConfig)
-	go sub.Run(ctx)
+	// groups owns one BackendList (+ Subscriber, HealthChecker,
+	// HealthReporter) per backend group this instance ends up proxying
+	// to. -group's subscription is started eagerly below so an instance
+	// with no L7 routes configured behaves exactly as before; any
+	// additional group referenced by a route rule is started lazily, the
+	// first time a request actually resolves to it.
+	groups := dataplane.NewGroupManager(ctx, *controlPlaneAddr, id, cpTLSConfig, dataplane.HealthCheckConfig{
+		Interval:         *healthCheckInterval,
+		Timeout:          *healthCheckTimeout,
+		FailureThreshold: *unhealthyThreshold,
+		SuccessThreshold: *healthyThreshold,
+	}, *healthReportInterval)
+	defaultBackends := groups.Ensure(*group)
 
-	healthChecker := dataplane.NewHealthChecker(backends)
-	healthChecker.Interval = *healthCheckInterval
-	healthChecker.Timeout = *healthCheckTimeout
-	healthChecker.FailureThreshold = *unhealthyThreshold
-	healthChecker.SuccessThreshold = *healthyThreshold
-	go healthChecker.Run(ctx)
+	routes := dataplane.NewRouteTable(*group)
+	routeSub := dataplane.NewRouteSubscriber(*controlPlaneAddr, id, routes, cpTLSConfig)
+	go routeSub.Run(ctx)
 
-	healthReporter := dataplane.NewHealthReporter(*controlPlaneAddr, *group, id, backends, cpTLSConfig, *healthReportInterval)
-	go healthReporter.Run(ctx)
-
-	proxy := dataplane.NewProxy(backends)
+	proxy := dataplane.NewProxy(routes, groups)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", proxy.Handler())
@@ -95,10 +100,12 @@ func main() {
 	})
 	mux.HandleFunc("/debug/backends", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		body := "group: " + *group + "\n" +
-			"backend count: " + strconv.Itoa(backends.Len()) + "\n" +
-			"healthy count: " + strconv.Itoa(backends.HealthyLen()) + "\n" +
-			"version: " + strconv.FormatInt(backends.Version(), 10) + "\n"
+		body := "default group: " + *group + "\n" +
+			"backend count: " + strconv.Itoa(defaultBackends.Len()) + "\n" +
+			"healthy count: " + strconv.Itoa(defaultBackends.HealthyLen()) + "\n" +
+			"version: " + strconv.FormatInt(defaultBackends.Version(), 10) + "\n" +
+			"routes configured: " + strconv.Itoa(routes.Len()) + "\n" +
+			"tracked groups: " + strings.Join(groups.Groups(), ", ") + "\n"
 		if _, err := w.Write([]byte(body)); err != nil {
 			log.Printf("dataplane: failed to write /debug/backends response: %v", err)
 		}

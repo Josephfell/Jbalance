@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +26,8 @@ type StateProvider interface {
 	ClearOverride(ctx context.Context, group, address string) error
 	SetAlgorithm(ctx context.Context, group string, algorithm controlplane.Algorithm) error
 	FleetSnapshot() []controlplane.InstanceState
+	Routes() []controlplane.Route
+	SetRoutes(routes []controlplane.Route) error
 }
 
 // Server serves the admin web management interface: a password-protected
@@ -103,6 +107,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /password", s.requireAuth(s.handlePasswordSubmit))
 	mux.HandleFunc("GET /audit", s.requireAuth(s.handleAuditPage))
 	mux.HandleFunc("GET /fleet", s.requireAuth(s.handleFleetPage))
+	mux.HandleFunc("GET /routes", s.requireAuth(s.handleRoutesPage))
+	mux.HandleFunc("POST /routes", s.requireAuth(s.handleRoutesSubmit))
 	return mux
 }
 
@@ -266,6 +272,169 @@ type fleetRow struct {
 	LastHealthReport string
 	ReportedBackends int
 	HasHealthReport  bool
+}
+
+// routeRow is the display/edit form of controlplane.Route, with Methods
+// flattened to a comma-separated string for a single text input rather
+// than a multi-select — L7 routing methods lists are short (GET, POST,
+// etc), so a plain "GET, POST" text field is simpler than any JS-free
+// multi-select control would be.
+type routeRow struct {
+	Order       int
+	Host        string
+	PathPrefix  string
+	Methods     string
+	TargetGroup string
+	Name        string
+}
+
+func routesToRows(routes []controlplane.Route) []routeRow {
+	rows := make([]routeRow, len(routes))
+	for i, r := range routes {
+		rows[i] = routeRow{
+			Order:       i,
+			Host:        r.Host,
+			PathPrefix:  r.PathPrefix,
+			Methods:     strings.Join(r.Methods, ", "),
+			TargetGroup: r.TargetGroup,
+			Name:        r.Name,
+		}
+	}
+	return rows
+}
+
+func (s *Server) handleRoutesPage(w http.ResponseWriter, r *http.Request) {
+	groups := s.state.Snapshot(r.Context())
+	groupNames := make([]string, len(groups))
+	for i, g := range groups {
+		groupNames[i] = g.Group
+	}
+	routes := s.state.Routes()
+
+	groupsJSON, err := json.Marshal(groupNames)
+	if err != nil {
+		groupsJSON = []byte("[]") // groupNames is always a []string of plain names — marshal cannot realistically fail
+	}
+
+	s.render(w, "routes", map[string]any{
+		"Rows": routesToRows(routes),
+		// Groups is used by the Go template to render each row's <select>
+		// server-side; GroupsJSON feeds the same option list to the
+		// client-side "+ Add rule" script, which builds new rows without
+		// a round trip. template.JS marks it as already-safe JS so
+		// html/template doesn't further HTML-escape valid JSON syntax
+		// (e.g. escaping quotes) inside the inline <script> block.
+		"Groups":     groupNames,
+		"GroupsJSON": template.JS(groupsJSON), //nolint:gosec // groupNames originates from Snapshot()'s own group names, not user input
+		"CSRFToken":  s.newCSRFToken(w),
+		"NextOrder":  len(routes),
+	})
+}
+
+// handleRoutesSubmit rebuilds the entire route table from the submitted
+// form and saves it in one call — routing order is part of a rule's
+// meaning (first match wins), so the table is edited as a whole ordered
+// list rather than through individual add/remove endpoints that could
+// leave order ambiguous between concurrent edits.
+//
+// Every row's fields are submitted as same-named, same-length arrays
+// (r.Form["host"][i] belongs to the same row as r.Form["order"][i], etc)
+// — relying on Go's http.Request preserving multi-value form fields in
+// the order the browser sent them, which for a plain sequentially
+// rendered form matches row order. A "action" value of "delete" (rather
+// than a checkbox, which would omit unchecked boxes and break positional
+// alignment between the arrays) removes that row instead of keeping it.
+func (s *Server) handleRoutesSubmit(w http.ResponseWriter, r *http.Request) {
+	if !s.checkCSRF(r) {
+		http.Redirect(w, r, "/routes", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/routes", http.StatusSeeOther)
+		return
+	}
+
+	orders := r.Form["order"]
+	hosts := r.Form["host"]
+	pathPrefixes := r.Form["path_prefix"]
+	methodsList := r.Form["methods"]
+	targetGroups := r.Form["target_group"]
+	names := r.Form["name"]
+	actions := r.Form["action"]
+
+	n := len(hosts)
+	type indexed struct {
+		order int
+		route controlplane.Route
+	}
+	kept := make([]indexed, 0, n)
+	for i := 0; i < n; i++ {
+		if i < len(actions) && actions[i] == "delete" {
+			continue
+		}
+		targetGroup := valueAt(targetGroups, i)
+		if targetGroup == "" {
+			continue // a row with no target group is meaningless — silently dropped rather than saved as broken config
+		}
+		order, _ := strconv.Atoi(valueAt(orders, i))
+		kept = append(kept, indexed{
+			order: order,
+			route: controlplane.Route{
+				Host:        valueAt(hosts, i),
+				PathPrefix:  valueAt(pathPrefixes, i),
+				Methods:     splitMethods(valueAt(methodsList, i)),
+				TargetGroup: targetGroup,
+				Name:        valueAt(names, i),
+			},
+		})
+	}
+	sort.SliceStable(kept, func(a, b int) bool { return kept[a].order < kept[b].order })
+
+	routes := make([]controlplane.Route, len(kept))
+	for i, k := range kept {
+		routes[i] = k.route
+	}
+
+	if err := s.state.SetRoutes(routes); err != nil {
+		s.audit.Record(AuditRoutesChanged, s.clientIP(r), "route table update failed: "+err.Error())
+	} else {
+		s.audit.Record(AuditRoutesChanged, s.clientIP(r), fmt.Sprintf("route table updated (%d rule(s))", len(routes)))
+	}
+
+	http.Redirect(w, r, "/routes", http.StatusSeeOther)
+}
+
+// valueAt returns s[i] if i is in range, or "" otherwise — form field
+// arrays can end up shorter than expected if a browser ever omits a
+// disabled/malformed field, and a missing value should be treated as
+// empty rather than panicking the request.
+func valueAt(s []string, i int) string {
+	if i < 0 || i >= len(s) {
+		return ""
+	}
+	return strings.TrimSpace(s[i])
+}
+
+// splitMethods parses a comma-separated methods field into a clean list,
+// dropping empty entries from stray commas/whitespace. Returns nil (not
+// an empty non-nil slice) for an empty input, matching Route.Methods'
+// "empty means any method" contract.
+func splitMethods(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.ToUpper(strings.TrimSpace(p))
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (s *Server) handleFleetPage(w http.ResponseWriter, r *http.Request) {

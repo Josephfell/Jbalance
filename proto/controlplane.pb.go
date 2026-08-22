@@ -354,6 +354,196 @@ func (*HealthReportAck) Descriptor() ([]byte, []int) {
 	return file_proto_controlplane_proto_rawDescGZIP(), []int{5}
 }
 
+type StreamRoutesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Human-readable identifier for the connecting data plane instance,
+	// used only for control plane logging/observability.
+	InstanceId    string `protobuf:"bytes,1,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StreamRoutesRequest) Reset() {
+	*x = StreamRoutesRequest{}
+	mi := &file_proto_controlplane_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamRoutesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamRoutesRequest) ProtoMessage() {}
+
+func (x *StreamRoutesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_controlplane_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamRoutesRequest.ProtoReflect.Descriptor instead.
+func (*StreamRoutesRequest) Descriptor() ([]byte, []int) {
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *StreamRoutesRequest) GetInstanceId() string {
+	if x != nil {
+		return x.InstanceId
+	}
+	return ""
+}
+
+type Route struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Host to match, exact string. "*" or empty matches any host — a
+	// data plane with a single route relying on the default group
+	// shouldn't need to specify a host at all.
+	Host string `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
+	// Path prefix to match, e.g. "/api/". "/" matches every path.
+	// Evaluated as a literal prefix, not a pattern language — kept
+	// deliberately simple for a first cut of L7 routing.
+	PathPrefix string `protobuf:"bytes,2,opt,name=path_prefix,json=pathPrefix,proto3" json:"path_prefix,omitempty"`
+	// HTTP methods this rule applies to. Empty means any method.
+	Methods []string `protobuf:"bytes,3,rep,name=methods,proto3" json:"methods,omitempty"`
+	// Backend group a matching request is proxied to.
+	TargetGroup string `protobuf:"bytes,4,opt,name=target_group,json=targetGroup,proto3" json:"target_group,omitempty"`
+	// Display name/comment for the admin UI; not evaluated.
+	Name          string `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Route) Reset() {
+	*x = Route{}
+	mi := &file_proto_controlplane_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Route) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Route) ProtoMessage() {}
+
+func (x *Route) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_controlplane_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Route.ProtoReflect.Descriptor instead.
+func (*Route) Descriptor() ([]byte, []int) {
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *Route) GetHost() string {
+	if x != nil {
+		return x.Host
+	}
+	return ""
+}
+
+func (x *Route) GetPathPrefix() string {
+	if x != nil {
+		return x.PathPrefix
+	}
+	return ""
+}
+
+func (x *Route) GetMethods() []string {
+	if x != nil {
+		return x.Methods
+	}
+	return nil
+}
+
+func (x *Route) GetTargetGroup() string {
+	if x != nil {
+		return x.TargetGroup
+	}
+	return ""
+}
+
+func (x *Route) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+type RouteTable struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Rules in evaluation order — the data plane checks them top to bottom
+	// and uses the first match. A request matching no rule falls back to
+	// the data plane's own -group flag, so an instance with an empty (or
+	// unreachable) route table keeps behaving exactly as it did before L7
+	// routing existed.
+	Routes []*Route `protobuf:"bytes,1,rep,name=routes,proto3" json:"routes,omitempty"`
+	// Monotonically increasing version number, mirroring BackendSet.version
+	// — lets the data plane detect and ignore stale/out-of-order updates.
+	Version       int64 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RouteTable) Reset() {
+	*x = RouteTable{}
+	mi := &file_proto_controlplane_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouteTable) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouteTable) ProtoMessage() {}
+
+func (x *RouteTable) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_controlplane_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouteTable.ProtoReflect.Descriptor instead.
+func (*RouteTable) Descriptor() ([]byte, []int) {
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *RouteTable) GetRoutes() []*Route {
+	if x != nil {
+		return x.Routes
+	}
+	return nil
+}
+
+func (x *RouteTable) GetVersion() int64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
 var File_proto_controlplane_proto protoreflect.FileDescriptor
 
 const file_proto_controlplane_proto_rawDesc = "" +
@@ -380,10 +570,25 @@ const file_proto_controlplane_proto_rawDesc = "" +
 	"\vinstance_id\x18\x02 \x01(\tR\n" +
 	"instanceId\x127\n" +
 	"\bbackends\x18\x03 \x03(\v2\x1b.controlplane.BackendHealthR\bbackends\"\x11\n" +
-	"\x0fHealthReportAck2\xac\x01\n" +
+	"\x0fHealthReportAck\"6\n" +
+	"\x13StreamRoutesRequest\x12\x1f\n" +
+	"\vinstance_id\x18\x01 \x01(\tR\n" +
+	"instanceId\"\x8d\x01\n" +
+	"\x05Route\x12\x12\n" +
+	"\x04host\x18\x01 \x01(\tR\x04host\x12\x1f\n" +
+	"\vpath_prefix\x18\x02 \x01(\tR\n" +
+	"pathPrefix\x12\x18\n" +
+	"\amethods\x18\x03 \x03(\tR\amethods\x12!\n" +
+	"\ftarget_group\x18\x04 \x01(\tR\vtargetGroup\x12\x12\n" +
+	"\x04name\x18\x05 \x01(\tR\x04name\"S\n" +
+	"\n" +
+	"RouteTable\x12+\n" +
+	"\x06routes\x18\x01 \x03(\v2\x13.controlplane.RouteR\x06routes\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x03R\aversion2\xfb\x01\n" +
 	"\fControlPlane\x12Q\n" +
 	"\x0eStreamBackends\x12#.controlplane.StreamBackendsRequest\x1a\x18.controlplane.BackendSet0\x01\x12I\n" +
-	"\fReportHealth\x12\x1a.controlplane.HealthReport\x1a\x1d.controlplane.HealthReportAckB&Z$github.com/Josephfell/Jbalance/protob\x06proto3"
+	"\fReportHealth\x12\x1a.controlplane.HealthReport\x1a\x1d.controlplane.HealthReportAck\x12M\n" +
+	"\fStreamRoutes\x12!.controlplane.StreamRoutesRequest\x1a\x18.controlplane.RouteTable0\x01B&Z$github.com/Josephfell/Jbalance/protob\x06proto3"
 
 var (
 	file_proto_controlplane_proto_rawDescOnce sync.Once
@@ -397,7 +602,7 @@ func file_proto_controlplane_proto_rawDescGZIP() []byte {
 	return file_proto_controlplane_proto_rawDescData
 }
 
-var file_proto_controlplane_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_proto_controlplane_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_proto_controlplane_proto_goTypes = []any{
 	(*StreamBackendsRequest)(nil), // 0: controlplane.StreamBackendsRequest
 	(*Backend)(nil),               // 1: controlplane.Backend
@@ -405,19 +610,25 @@ var file_proto_controlplane_proto_goTypes = []any{
 	(*BackendHealth)(nil),         // 3: controlplane.BackendHealth
 	(*HealthReport)(nil),          // 4: controlplane.HealthReport
 	(*HealthReportAck)(nil),       // 5: controlplane.HealthReportAck
+	(*StreamRoutesRequest)(nil),   // 6: controlplane.StreamRoutesRequest
+	(*Route)(nil),                 // 7: controlplane.Route
+	(*RouteTable)(nil),            // 8: controlplane.RouteTable
 }
 var file_proto_controlplane_proto_depIdxs = []int32{
 	1, // 0: controlplane.BackendSet.backends:type_name -> controlplane.Backend
 	3, // 1: controlplane.HealthReport.backends:type_name -> controlplane.BackendHealth
-	0, // 2: controlplane.ControlPlane.StreamBackends:input_type -> controlplane.StreamBackendsRequest
-	4, // 3: controlplane.ControlPlane.ReportHealth:input_type -> controlplane.HealthReport
-	2, // 4: controlplane.ControlPlane.StreamBackends:output_type -> controlplane.BackendSet
-	5, // 5: controlplane.ControlPlane.ReportHealth:output_type -> controlplane.HealthReportAck
-	4, // [4:6] is the sub-list for method output_type
-	2, // [2:4] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	7, // 2: controlplane.RouteTable.routes:type_name -> controlplane.Route
+	0, // 3: controlplane.ControlPlane.StreamBackends:input_type -> controlplane.StreamBackendsRequest
+	4, // 4: controlplane.ControlPlane.ReportHealth:input_type -> controlplane.HealthReport
+	6, // 5: controlplane.ControlPlane.StreamRoutes:input_type -> controlplane.StreamRoutesRequest
+	2, // 6: controlplane.ControlPlane.StreamBackends:output_type -> controlplane.BackendSet
+	5, // 7: controlplane.ControlPlane.ReportHealth:output_type -> controlplane.HealthReportAck
+	8, // 8: controlplane.ControlPlane.StreamRoutes:output_type -> controlplane.RouteTable
+	6, // [6:9] is the sub-list for method output_type
+	3, // [3:6] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_proto_controlplane_proto_init() }
@@ -431,7 +642,7 @@ func file_proto_controlplane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_controlplane_proto_rawDesc), len(file_proto_controlplane_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

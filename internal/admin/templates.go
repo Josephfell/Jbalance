@@ -193,6 +193,18 @@ const templatesSource = `
   /* — login — */
   .center-page { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
   .login-card { width: 100%; max-width: 380px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 30px; }
+
+  /* — routes editor — */
+  .routes-table input[type=text], .routes-table select {
+    width: 100%; font-size: 12.5px; padding: 6px 8px;
+  }
+  .routes-table td { padding: 6px 8px; vertical-align: top; }
+  .routes-table th { padding: 8px; }
+  .routes-order { width: 34px; text-align: center; color: var(--text-faint); font-family: var(--mono); font-size: 12px; padding-top: 10px; }
+  .routes-note { font-size: 11.5px; color: var(--text-faint); margin: 0 0 12px; }
+  .routes-actions { display: flex; justify-content: space-between; align-items: center; padding: 11px 14px; border-top: 1px solid var(--border); }
+  .col-host { width: 15%; } .col-path { width: 15%; } .col-methods { width: 15%; }
+  .col-group { width: 15%; } .col-name { width: 20%; } .col-del { width: 60px; text-align: center; }
   .login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
   .login-title { font-size: 19px; margin-bottom: 3px; }
   .login-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 20px; }
@@ -214,6 +226,10 @@ const templatesSource = `
     <a href="/" {{if eq .Active "dashboard"}}class="active"{{end}}>
       <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="13" y="3" width="8" height="5" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="13" y="10" width="8" height="11" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="13" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.6"/></svg>
       <span>Dashboard</span>
+    </a>
+    <a href="/routes" {{if eq .Active "routes"}}class="active"{{end}}>
+      <svg viewBox="0 0 24 24" fill="none"><path d="M4 6h6l2 2h8M4 18h6l2-2h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Routes</span>
     </a>
     <a href="/fleet" {{if eq .Active "fleet"}}class="active"{{end}}>
       <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="5" rx="1.3" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="10.5" width="18" height="5" rx="1.3" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="17" width="18" height="4" rx="1.3" stroke="currentColor" stroke-width="1.6"/></svg>
@@ -458,6 +474,163 @@ const templatesSource = `
       var el = document.getElementById('clock');
       function tick() { if (el) el.textContent = 'live · ' + new Date().toLocaleTimeString(); }
       tick(); setInterval(tick, 1000);
+    })();
+  </script>
+</body>
+</html>
+{{end}}
+
+{{define "routes"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Routes — jbalance</title>
+  {{template "style"}}
+</head>
+<body>
+  <div class="app">
+    {{template "sidebar" (dict "Active" "routes")}}
+    <div class="main">
+      <header class="topbar">
+        <h1>L7 Routes</h1>
+        <span class="sub">evaluated top to bottom · first match wins · applies to every data plane instance</span>
+        <div class="right"><span class="clock-pill" id="clock"></span></div>
+      </header>
+      <div class="content">
+        <p class="routes-note">A request matching no rule below (or an empty table) falls back to each data plane instance's own <code>-group</code> flag. Host and path-prefix fields may be left blank to match anything; the methods field accepts a comma-separated list (e.g. <code>GET, POST</code>) and is left blank to match any method.</p>
+        <form method="post" action="/routes" id="routes-form">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <section class="card">
+            <table class="table routes-table">
+              <tr>
+                <th></th>
+                <th class="col-name">Name</th>
+                <th class="col-host">Host</th>
+                <th class="col-path">Path prefix</th>
+                <th class="col-methods">Methods</th>
+                <th class="col-group">Target group</th>
+                <th class="col-del">Remove</th>
+              </tr>
+              <tbody id="routes-body">
+                {{range .Rows}}
+                <tr>
+                  <td class="routes-order">{{.Order}}</td>
+                  <td><input type="text" name="name" value="{{.Name}}" placeholder="optional"></td>
+                  <td><input type="text" name="host" value="{{.Host}}" placeholder="* (any)"></td>
+                  <td><input type="text" name="path_prefix" value="{{.PathPrefix}}" placeholder="/"></td>
+                  <td><input type="text" name="methods" value="{{.Methods}}" placeholder="any"></td>
+                  <td>
+                    <select name="target_group">
+                      <option value="">— select —</option>
+                      {{$current := .TargetGroup}}
+                      {{range $.Groups}}
+                      <option value="{{.}}" {{if eq . $current}}selected{{end}}>{{.}}</option>
+                      {{end}}
+                    </select>
+                  </td>
+                  <td class="col-del">
+                    <input type="hidden" name="order" value="{{.Order}}">
+                    <input type="hidden" name="action" value="keep">
+                    <button type="button" class="btn btn-danger route-remove-btn">Remove</button>
+                  </td>
+                </tr>
+                {{end}}
+              </tbody>
+            </table>
+            <div class="routes-actions">
+              <button type="button" class="btn" id="add-route-btn">+ Add rule</button>
+              <button type="submit" class="btn btn-primary">Save route table</button>
+            </div>
+          </section>
+        </form>
+      </div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var el = document.getElementById('clock');
+      function tick() { if (el) el.textContent = 'live · ' + new Date().toLocaleTimeString(); }
+      tick(); setInterval(tick, 1000);
+    })();
+  </script>
+  <script>
+    // Client-side row add/remove for a JS-free-degradable form: every row
+    // is plain inputs the server already knows how to parse (order/host/
+    // path_prefix/methods/target_group/name/action), so this script only
+    // manipulates the DOM — the actual save is a normal form POST with no
+    // fetch() involved. Without JS, the "+ Add rule"/"Remove" buttons are
+    // simply inert; existing rows can still be edited and saved.
+    (function () {
+      var groupOptions = {{.GroupsJSON}};
+      var body = document.getElementById('routes-body');
+      var nextOrder = {{.NextOrder}};
+
+      function renumber() {
+        Array.prototype.forEach.call(body.querySelectorAll('tr'), function (tr, i) {
+          tr.querySelector('.routes-order').textContent = i;
+          tr.querySelector('input[name="order"]').value = i;
+        });
+      }
+
+      function buildGroupSelect() {
+        var select = document.createElement('select');
+        select.name = 'target_group';
+        var blank = document.createElement('option');
+        blank.value = ''; blank.textContent = '— select —';
+        select.appendChild(blank);
+        groupOptions.forEach(function (g) {
+          var opt = document.createElement('option');
+          opt.value = g; opt.textContent = g;
+          select.appendChild(opt);
+        });
+        return select;
+      }
+
+      function addRow() {
+        var tr = document.createElement('tr');
+
+        var orderTd = document.createElement('td');
+        orderTd.className = 'routes-order';
+        orderTd.textContent = String(nextOrder);
+        tr.appendChild(orderTd);
+
+        [['name', 'optional'], ['host', '* (any)'], ['path_prefix', '/'], ['methods', 'any']].forEach(function (f) {
+          var td = document.createElement('td');
+          var input = document.createElement('input');
+          input.type = 'text'; input.name = f[0]; input.placeholder = f[1];
+          td.appendChild(input);
+          tr.appendChild(td);
+        });
+
+        var groupTd = document.createElement('td');
+        groupTd.appendChild(buildGroupSelect());
+        tr.appendChild(groupTd);
+
+        var delTd = document.createElement('td');
+        delTd.className = 'col-del';
+        var orderInput = document.createElement('input');
+        orderInput.type = 'hidden'; orderInput.name = 'order'; orderInput.value = String(nextOrder);
+        var actionInput = document.createElement('input');
+        actionInput.type = 'hidden'; actionInput.name = 'action'; actionInput.value = 'keep';
+        var removeBtn = document.createElement('button');
+        removeBtn.type = 'button'; removeBtn.className = 'btn btn-danger route-remove-btn';
+        removeBtn.textContent = 'Remove';
+        delTd.appendChild(orderInput); delTd.appendChild(actionInput); delTd.appendChild(removeBtn);
+        tr.appendChild(delTd);
+
+        body.appendChild(tr);
+        nextOrder++;
+      }
+
+      document.getElementById('add-route-btn').addEventListener('click', addRow);
+      body.addEventListener('click', function (e) {
+        if (e.target.classList.contains('route-remove-btn')) {
+          e.target.closest('tr').remove();
+          renumber();
+        }
+      });
     })();
   </script>
 </body>

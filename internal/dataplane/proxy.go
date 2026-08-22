@@ -8,14 +8,17 @@ import (
 	"net/url"
 )
 
-// Proxy is an L7 HTTP reverse proxy that selects a backend from a
-// BackendList (weighted round-robin) for every incoming request. It is
-// deliberately "dumb" — all routing intelligence (which backends exist,
-// their weights) is pushed to it by the control plane; the proxy itself
-// just picks the next one and forwards.
+// Proxy is an L7 HTTP reverse proxy that, for every incoming request,
+// resolves a target backend group via a RouteTable (host/path/method
+// rules, falling back to the instance's default group), then selects a
+// backend from that group's BackendList. It is deliberately "dumb" — all
+// routing intelligence (which rules exist, which backends exist, their
+// weights) is pushed to it by the control plane; the proxy itself just
+// resolves, picks the next backend, and forwards.
 type Proxy struct {
-	backends *BackendList
-	rp       *httputil.ReverseProxy
+	routes *RouteTable
+	groups *GroupManager
+	rp     *httputil.ReverseProxy
 }
 
 // contextKey avoids collisions with other packages' context values.
@@ -27,12 +30,13 @@ func contextWithBackendAddr(ctx context.Context, addr string) context.Context {
 	return context.WithValue(ctx, backendAddrKey, addr)
 }
 
-// NewProxy creates a reverse proxy backed by the given BackendList. A
+// NewProxy creates a reverse proxy that resolves each request's target
+// group via routes and selects a backend within that group via groups. A
 // single httputil.ReverseProxy is reused across all requests; the target
 // backend is selected per-request via the Rewrite hook rather than
 // constructing a new ReverseProxy per call.
-func NewProxy(backends *BackendList) *Proxy {
-	p := &Proxy{backends: backends}
+func NewProxy(routes *RouteTable, groups *GroupManager) *Proxy {
+	p := &Proxy{routes: routes, groups: groups}
 
 	p.rp = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -50,11 +54,16 @@ func NewProxy(backends *BackendList) *Proxy {
 	return p
 }
 
-// Handler returns an http.Handler that proxies every request to the next
-// selected backend. Returns 503 if no backends are currently available.
+// Handler returns an http.Handler that resolves each request's target
+// backend group via the route table, then proxies to the next selected
+// backend within that group. Returns 503 if no backends are currently
+// available for the resolved group.
 func (p *Proxy) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		addr, ok := p.backends.Next()
+		group := p.routes.Resolve(r.Host, r.URL.Path, r.Method)
+		backends := p.groups.Ensure(group)
+
+		addr, ok := backends.Next()
 		if !ok {
 			http.Error(w, "no healthy backends available", http.StatusServiceUnavailable)
 			return
@@ -64,7 +73,7 @@ func (p *Proxy) Handler() http.Handler {
 		// streaming the response back to the client) has fully completed,
 		// so least_connections reflects real in-flight load rather than
 		// only ever growing.
-		defer p.backends.Release(addr)
+		defer backends.Release(addr)
 
 		ctx := contextWithBackendAddr(r.Context(), addr)
 		p.rp.ServeHTTP(w, r.WithContext(ctx))

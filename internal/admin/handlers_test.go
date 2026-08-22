@@ -22,6 +22,10 @@ func (fakeStateProvider) Snapshot(context.Context) []controlplane.GroupState { r
 
 func (fakeStateProvider) FleetSnapshot() []controlplane.InstanceState { return nil }
 
+func (fakeStateProvider) Routes() []controlplane.Route { return nil }
+
+func (fakeStateProvider) SetRoutes([]controlplane.Route) error { return nil }
+
 func (fakeStateProvider) SetOverride(context.Context, string, string, *int32, bool) error {
 	return nil
 }
@@ -387,6 +391,8 @@ type spyStateProvider struct {
 	algorithmCalls []algorithmCall
 	err            error
 	fleet          []controlplane.InstanceState
+	routes         []controlplane.Route
+	routesSaved    []controlplane.Route
 }
 
 type overrideCall struct {
@@ -407,6 +413,13 @@ type algorithmCall struct {
 func (s *spyStateProvider) Snapshot(context.Context) []controlplane.GroupState { return nil }
 
 func (s *spyStateProvider) FleetSnapshot() []controlplane.InstanceState { return s.fleet }
+
+func (s *spyStateProvider) Routes() []controlplane.Route { return s.routes }
+
+func (s *spyStateProvider) SetRoutes(routes []controlplane.Route) error {
+	s.routesSaved = routes
+	return s.err
+}
 
 func (s *spyStateProvider) SetOverride(_ context.Context, group, address string, weight *int32, drained bool) error {
 	s.overrideCalls = append(s.overrideCalls, overrideCall{group, address, weight, drained})
@@ -728,5 +741,206 @@ func TestFormatDuration(t *testing.T) {
 		if got := formatDuration(tc.d); got != tc.want {
 			t.Errorf("formatDuration(%v) = %q, want %q", tc.d, got, tc.want)
 		}
+	}
+}
+
+func TestHandler_RoutesPage_RendersExistingRules(t *testing.T) {
+	srv, password, spy := newTestServerWithSpy(t)
+	spy.routes = []controlplane.Route{
+		{Host: "acme.io", PathPrefix: "/api/", Methods: []string{"GET", "POST"}, TargetGroup: "api-tier", Name: "api"},
+	}
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/routes", nil)
+	req.AddCookie(session)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `value="acme.io"`) {
+		t.Error("expected the existing route's host to be rendered")
+	}
+	if !strings.Contains(body, `value="/api/"`) {
+		t.Error("expected the existing route's path prefix to be rendered")
+	}
+	if !strings.Contains(body, "GET, POST") {
+		t.Error("expected the existing route's methods to be rendered as a comma-separated list")
+	}
+}
+
+func TestHandler_RoutesPage_RequiresAuth(t *testing.T) {
+	srv, _, _ := newTestServerWithSpy(t)
+	req := httptest.NewRequest(http.MethodGet, "/routes", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("expected an unauthenticated request to be redirected, got %d", rec.Code)
+	}
+}
+
+func TestHandler_RoutesSubmit_SavesOrderedRoutes(t *testing.T) {
+	srv, password, spy := newTestServerWithSpy(t)
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, password)
+	cookies, csrf := getAuthedCSRFAndCookies(t, handler, "/routes", session)
+
+	form := url.Values{
+		"csrf_token":   {csrf},
+		"order":        {"0", "1"},
+		"name":         {"static", "default"},
+		"host":         {"acme.io", ""},
+		"path_prefix":  {"/static/", "/"},
+		"methods":      {"", "GET, post"},
+		"target_group": {"static-edge", "web-tier"},
+		"action":       {"keep", "keep"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/routes", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected a redirect, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(spy.routesSaved) != 2 {
+		t.Fatalf("expected 2 saved routes, got %d: %+v", len(spy.routesSaved), spy.routesSaved)
+	}
+	if spy.routesSaved[0].TargetGroup != "static-edge" || spy.routesSaved[0].Host != "acme.io" {
+		t.Errorf("unexpected first saved route: %+v", spy.routesSaved[0])
+	}
+	if spy.routesSaved[1].TargetGroup != "web-tier" {
+		t.Errorf("unexpected second saved route: %+v", spy.routesSaved[1])
+	}
+	if len(spy.routesSaved[1].Methods) != 2 || spy.routesSaved[1].Methods[0] != "GET" || spy.routesSaved[1].Methods[1] != "POST" {
+		t.Errorf("expected methods to be parsed and normalised to uppercase, got %+v", spy.routesSaved[1].Methods)
+	}
+}
+
+func TestHandler_RoutesSubmit_DeleteActionRemovesRow(t *testing.T) {
+	srv, password, spy := newTestServerWithSpy(t)
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, password)
+	cookies, csrf := getAuthedCSRFAndCookies(t, handler, "/routes", session)
+
+	form := url.Values{
+		"csrf_token":   {csrf},
+		"order":        {"0", "1"},
+		"name":         {"keep-me", "delete-me"},
+		"host":         {"", ""},
+		"path_prefix":  {"/", "/gone/"},
+		"methods":      {"", ""},
+		"target_group": {"web-tier", "api-tier"},
+		"action":       {"keep", "delete"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/routes", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if len(spy.routesSaved) != 1 || spy.routesSaved[0].Name != "keep-me" {
+		t.Errorf("expected the deleted row to be excluded, got %+v", spy.routesSaved)
+	}
+}
+
+func TestHandler_RoutesSubmit_RowWithoutTargetGroupIsDropped(t *testing.T) {
+	srv, password, spy := newTestServerWithSpy(t)
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, password)
+	cookies, csrf := getAuthedCSRFAndCookies(t, handler, "/routes", session)
+
+	form := url.Values{
+		"csrf_token":   {csrf},
+		"order":        {"0"},
+		"name":         {"incomplete"},
+		"host":         {""},
+		"path_prefix":  {"/"},
+		"methods":      {""},
+		"target_group": {""}, // no target selected
+		"action":       {"keep"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/routes", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if len(spy.routesSaved) != 0 {
+		t.Errorf("expected a row with no target group to be dropped, got %+v", spy.routesSaved)
+	}
+}
+
+func TestHandler_RoutesSubmit_RequiresCSRF(t *testing.T) {
+	srv, password, spy := newTestServerWithSpy(t)
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, password)
+
+	form := url.Values{
+		"order":        {"0"},
+		"target_group": {"web-tier"},
+		"action":       {"keep"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/routes", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(session)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if len(spy.routesSaved) != 0 {
+		t.Errorf("expected no SetRoutes call without a valid CSRF token, got %+v", spy.routesSaved)
+	}
+}
+
+func TestSplitMethods(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"GET", []string{"GET"}},
+		{"get, post", []string{"GET", "POST"}},
+		{" GET ,  , POST ", []string{"GET", "POST"}},
+		{",,,", nil},
+	}
+	for _, tc := range cases {
+		got := splitMethods(tc.in)
+		if len(got) != len(tc.want) {
+			t.Errorf("splitMethods(%q) = %v, want %v", tc.in, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("splitMethods(%q) = %v, want %v", tc.in, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+func TestValueAt(t *testing.T) {
+	s := []string{"a", " b "}
+	if valueAt(s, 0) != "a" {
+		t.Errorf("expected valueAt(s, 0) = %q, got %q", "a", valueAt(s, 0))
+	}
+	if valueAt(s, 1) != "b" {
+		t.Errorf("expected valueAt to trim whitespace, got %q", valueAt(s, 1))
+	}
+	if valueAt(s, 5) != "" {
+		t.Errorf("expected an out-of-range index to return empty string, got %q", valueAt(s, 5))
+	}
+	if valueAt(s, -1) != "" {
+		t.Errorf("expected a negative index to return empty string, got %q", valueAt(s, -1))
 	}
 }

@@ -10,7 +10,7 @@ import (
 )
 
 func TestReportHealth_UpdatesHealthState(t *testing.T) {
-	srv := NewServer(nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil)
 	srv.publishIfChanged("g1", pool.Snapshot{
 		Group:    "g1",
 		Backends: []pool.Backend{{Address: "a:1", Weight: 1}},
@@ -35,7 +35,7 @@ func TestReportHealth_UpdatesHealthState(t *testing.T) {
 }
 
 func TestHealthForAddress_UnknownBeforeAnyReport(t *testing.T) {
-	srv := NewServer(nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil)
 	_, known := srv.healthForAddress("g1", "a:1")
 	if known {
 		t.Error("expected health to be unknown before any report is received")
@@ -43,7 +43,7 @@ func TestHealthForAddress_UnknownBeforeAnyReport(t *testing.T) {
 }
 
 func TestHealthForAddress_UnhealthyIfAnyReporterDisagrees(t *testing.T) {
-	srv := NewServer(nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil)
 
 	_, _ = srv.ReportHealth(context.Background(), &pb.HealthReport{
 		Group:      "g1",
@@ -66,7 +66,7 @@ func TestHealthForAddress_UnhealthyIfAnyReporterDisagrees(t *testing.T) {
 }
 
 func TestHealthForAddress_StaleReportsAreIgnored(t *testing.T) {
-	srv := NewServer(nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil)
 
 	srv.healthMu.Lock()
 	srv.health[backendHealthKey{group: "g1", instanceID: "dp-1", address: "a:1"}] = healthEntry{
@@ -82,7 +82,7 @@ func TestHealthForAddress_StaleReportsAreIgnored(t *testing.T) {
 }
 
 func TestHealthForAddress_ScopedToGroup(t *testing.T) {
-	srv := NewServer(nil, nil, nil)
+	srv := NewServer(nil, nil, nil, nil)
 
 	_, _ = srv.ReportHealth(context.Background(), &pb.HealthReport{
 		Group:      "g1",
@@ -103,7 +103,7 @@ func TestSnapshot_IncludesHealthState(t *testing.T) {
 			"g1": {Group: "g1", Backends: []pool.Backend{{Address: "a:1", Weight: 1}, {Address: "b:1", Weight: 1}}},
 		},
 	}
-	srv := NewServer(provider, nil, nil)
+	srv := NewServer(provider, nil, nil, nil)
 	srv.publishIfChanged("g1", provider.snapshots["g1"])
 	_, _ = srv.ReportHealth(context.Background(), &pb.HealthReport{
 		Group:      "g1",

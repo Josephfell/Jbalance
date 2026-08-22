@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	ControlPlane_StreamBackends_FullMethodName = "/controlplane.ControlPlane/StreamBackends"
 	ControlPlane_ReportHealth_FullMethodName   = "/controlplane.ControlPlane/ReportHealth"
+	ControlPlane_StreamRoutes_FullMethodName   = "/controlplane.ControlPlane/StreamRoutes"
 )
 
 // ControlPlaneClient is the client API for ControlPlane service.
@@ -42,6 +43,13 @@ type ControlPlaneClient interface {
 	// visibility into backend health on its own — this is how that
 	// information flows back, so it can be surfaced in the admin web UI.
 	ReportHealth(ctx context.Context, in *HealthReport, opts ...grpc.CallOption) (*HealthReportAck, error)
+	// StreamRoutes opens a long-lived stream and pushes the current L7
+	// route table, then a new one every time it changes. Unlike
+	// StreamBackends, the route table is global (not scoped to a group) —
+	// it's how one data plane instance can route different requests to
+	// different backend groups from a single listener, rather than being
+	// pinned to a single group for its entire lifetime.
+	StreamRoutes(ctx context.Context, in *StreamRoutesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RouteTable], error)
 }
 
 type controlPlaneClient struct {
@@ -81,6 +89,25 @@ func (c *controlPlaneClient) ReportHealth(ctx context.Context, in *HealthReport,
 	return out, nil
 }
 
+func (c *controlPlaneClient) StreamRoutes(ctx context.Context, in *StreamRoutesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RouteTable], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ControlPlane_ServiceDesc.Streams[1], ControlPlane_StreamRoutes_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[StreamRoutesRequest, RouteTable]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlPlane_StreamRoutesClient = grpc.ServerStreamingClient[RouteTable]
+
 // ControlPlaneServer is the server API for ControlPlane service.
 // All implementations must embed UnimplementedControlPlaneServer
 // for forward compatibility.
@@ -100,6 +127,13 @@ type ControlPlaneServer interface {
 	// visibility into backend health on its own — this is how that
 	// information flows back, so it can be surfaced in the admin web UI.
 	ReportHealth(context.Context, *HealthReport) (*HealthReportAck, error)
+	// StreamRoutes opens a long-lived stream and pushes the current L7
+	// route table, then a new one every time it changes. Unlike
+	// StreamBackends, the route table is global (not scoped to a group) —
+	// it's how one data plane instance can route different requests to
+	// different backend groups from a single listener, rather than being
+	// pinned to a single group for its entire lifetime.
+	StreamRoutes(*StreamRoutesRequest, grpc.ServerStreamingServer[RouteTable]) error
 	mustEmbedUnimplementedControlPlaneServer()
 }
 
@@ -115,6 +149,9 @@ func (UnimplementedControlPlaneServer) StreamBackends(*StreamBackendsRequest, gr
 }
 func (UnimplementedControlPlaneServer) ReportHealth(context.Context, *HealthReport) (*HealthReportAck, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportHealth not implemented")
+}
+func (UnimplementedControlPlaneServer) StreamRoutes(*StreamRoutesRequest, grpc.ServerStreamingServer[RouteTable]) error {
+	return status.Error(codes.Unimplemented, "method StreamRoutes not implemented")
 }
 func (UnimplementedControlPlaneServer) mustEmbedUnimplementedControlPlaneServer() {}
 func (UnimplementedControlPlaneServer) testEmbeddedByValue()                      {}
@@ -166,6 +203,17 @@ func _ControlPlane_ReportHealth_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlane_StreamRoutes_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(StreamRoutesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ControlPlaneServer).StreamRoutes(m, &grpc.GenericServerStream[StreamRoutesRequest, RouteTable]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlPlane_StreamRoutesServer = grpc.ServerStreamingServer[RouteTable]
+
 // ControlPlane_ServiceDesc is the grpc.ServiceDesc for ControlPlane service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -182,6 +230,11 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "StreamBackends",
 			Handler:       _ControlPlane_StreamBackends_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "StreamRoutes",
+			Handler:       _ControlPlane_StreamRoutes_Handler,
 			ServerStreams: true,
 		},
 	},

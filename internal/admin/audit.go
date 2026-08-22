@@ -22,6 +22,7 @@ const (
 	AuditLogout           AuditEventType = "logout"
 	AuditOverrideChanged  AuditEventType = "override_changed"
 	AuditAlgorithmChanged AuditEventType = "algorithm_changed"
+	AuditRoutesChanged    AuditEventType = "routes_changed"
 )
 
 // AuditEntry is one recorded admin-UI event.

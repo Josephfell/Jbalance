@@ -64,6 +64,7 @@ type Server struct {
 	provider   pool.Provider
 	overrides  *OverrideStore
 	algorithms *AlgorithmStore
+	routes     *RouteStore
 
 	mu   sync.Mutex
 	subs map[string]map[chan *pb.BackendSet]struct{} // group -> set of subscriber channels
@@ -74,28 +75,41 @@ type Server struct {
 
 	instancesMu sync.RWMutex
 	instances   map[instanceKey]*instanceState
+
+	// routeSubsMu/routeSubs/lastRoutes mirror mu/subs/last above but for
+	// the global route table (StreamRoutes) rather than a per-group
+	// backend set — kept as separate fields/lock since the route table
+	// isn't scoped by group and has its own independent subscriber set.
+	routeSubsMu sync.Mutex
+	routeSubs   map[chan *pb.RouteTable]struct{}
+	lastRoutes  *pb.RouteTable
 }
 
 // NewServer creates a control plane server backed by the given provider.
-// overrides and algorithms may be nil, in which case manual weight/drain
-// overrides are disabled and every group uses AlgorithmRoundRobin (empty
-// in-memory stores are used instead so callers don't need nil checks
-// everywhere).
-func NewServer(provider pool.Provider, overrides *OverrideStore, algorithms *AlgorithmStore) *Server {
+// overrides, algorithms, and routes may be nil, in which case manual
+// weight/drain overrides are disabled, every group uses
+// AlgorithmRoundRobin, and no L7 routes are configured (empty in-memory
+// stores are used instead so callers don't need nil checks everywhere).
+func NewServer(provider pool.Provider, overrides *OverrideStore, algorithms *AlgorithmStore, routes *RouteStore) *Server {
 	if overrides == nil {
 		overrides = NewOverrideStore("")
 	}
 	if algorithms == nil {
 		algorithms = NewAlgorithmStore("")
 	}
+	if routes == nil {
+		routes = NewRouteStore("")
+	}
 	return &Server{
 		provider:   provider,
 		overrides:  overrides,
 		algorithms: algorithms,
+		routes:     routes,
 		subs:       make(map[string]map[chan *pb.BackendSet]struct{}),
 		last:       make(map[string]*pb.BackendSet),
 		health:     make(map[backendHealthKey]healthEntry),
 		instances:  make(map[instanceKey]*instanceState),
+		routeSubs:  make(map[chan *pb.RouteTable]struct{}),
 	}
 }
 
@@ -171,6 +185,95 @@ func (s *Server) SetAlgorithm(ctx context.Context, group string, algorithm Algor
 	}
 	s.forceRepublish(ctx, group)
 	return nil
+}
+
+// SetRoutes replaces the entire L7 route table and immediately pushes it
+// to every data plane instance currently subscribed via StreamRoutes.
+func (s *Server) SetRoutes(routes []Route) error {
+	if err := s.routes.Set(routes); err != nil {
+		return err
+	}
+	s.publishRoutes()
+	return nil
+}
+
+// Routes returns the current L7 route table, in evaluation order.
+func (s *Server) Routes() []Route {
+	return s.routes.Routes()
+}
+
+// publishRoutes converts the current route table to wire format and
+// sends it to every StreamRoutes subscriber. Always sends (no
+// equality/no-op check like publishIfChanged) — SetRoutes only calls this
+// after a real change, and the version bump inside RouteStore.Set is
+// itself proof of that, so there's no separate "did anything actually
+// change" comparison to make here.
+func (s *Server) publishRoutes() {
+	table := &pb.RouteTable{
+		Routes:  make([]*pb.Route, 0, len(s.routes.Routes())),
+		Version: s.routes.Version(),
+	}
+	for _, r := range s.routes.Routes() {
+		table.Routes = append(table.Routes, &pb.Route{
+			Host:        r.Host,
+			PathPrefix:  r.PathPrefix,
+			Methods:     r.Methods,
+			TargetGroup: r.TargetGroup,
+			Name:        r.Name,
+		})
+	}
+
+	s.routeSubsMu.Lock()
+	defer s.routeSubsMu.Unlock()
+	s.lastRoutes = table
+	for ch := range s.routeSubs {
+		select {
+		case ch <- table:
+		default:
+			log.Printf("controlplane: route table subscriber is slow, dropping update")
+		}
+	}
+	log.Printf("controlplane: route table updated to version %d (%d rules)", table.Version, len(table.Routes))
+}
+
+// StreamRoutes implements pb.ControlPlaneServer. It registers the caller
+// as a route-table subscriber, immediately sends the current table (if
+// any route has ever been set), and then streams further updates until
+// the client disconnects or the context is cancelled.
+func (s *Server) StreamRoutes(req *pb.StreamRoutesRequest, stream pb.ControlPlane_StreamRoutesServer) error {
+	instanceID := req.GetInstanceId()
+
+	ch := make(chan *pb.RouteTable, 4)
+	s.routeSubsMu.Lock()
+	s.routeSubs[ch] = struct{}{}
+	current := s.lastRoutes
+	s.routeSubsMu.Unlock()
+	defer func() {
+		s.routeSubsMu.Lock()
+		delete(s.routeSubs, ch)
+		s.routeSubsMu.Unlock()
+	}()
+
+	log.Printf("controlplane: data plane %q subscribed to route table", instanceID)
+
+	if current != nil {
+		if err := stream.Send(current); err != nil {
+			return err
+		}
+	}
+
+	ctx := stream.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("controlplane: data plane %q disconnected from route table stream", instanceID)
+			return ctx.Err()
+		case update := <-ch:
+			if err := stream.Send(update); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 // forceRepublish re-fetches the provider's current snapshot for group and

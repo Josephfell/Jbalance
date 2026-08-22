@@ -58,6 +58,7 @@ func main() {
 	adminAuditLogPath := flag.String("admin-audit-log-path", envflag.String("LB_ADMIN_AUDIT_LOG_PATH", "/var/lib/go-loadbalancer/audit.json"), "path to the local admin audit log file [env: LB_ADMIN_AUDIT_LOG_PATH]")
 	adminOverridesPath := flag.String("admin-overrides-path", envflag.String("LB_ADMIN_OVERRIDES_PATH", "/var/lib/go-loadbalancer/overrides.json"), "path to the local file storing manual per-backend weight/drain overrides set via the admin web UI [env: LB_ADMIN_OVERRIDES_PATH]")
 	adminAlgorithmsPath := flag.String("admin-algorithms-path", envflag.String("LB_ADMIN_ALGORITHMS_PATH", "/var/lib/go-loadbalancer/algorithms.json"), "path to the local file storing per-group load-balancing algorithm selections set via the admin web UI [env: LB_ADMIN_ALGORITHMS_PATH]")
+	adminRoutesPath := flag.String("admin-routes-path", envflag.String("LB_ADMIN_ROUTES_PATH", "/var/lib/go-loadbalancer/routes.json"), "path to the local file storing the L7 route table set via the admin web UI [env: LB_ADMIN_ROUTES_PATH]")
 	adminTLSCert := flag.String("admin-tls-cert", envflag.String("LB_ADMIN_TLS_CERT", ""), "path to a TLS certificate for the admin web UI; if unset, it serves plain HTTP [env: LB_ADMIN_TLS_CERT]")
 	adminTLSKey := flag.String("admin-tls-key", envflag.String("LB_ADMIN_TLS_KEY", ""), "path to the TLS private key matching -admin-tls-cert [env: LB_ADMIN_TLS_KEY]")
 	adminTrustForwardedFor := flag.Bool("admin-trust-forwarded-for", envflag.Bool("LB_ADMIN_TRUST_FORWARDED_FOR", false), "trust the X-Forwarded-For header for admin login rate limiting; only enable behind a trusted reverse proxy [env: LB_ADMIN_TRUST_FORWARDED_FOR]")
@@ -86,7 +87,8 @@ func main() {
 
 	overrides := controlplane.NewOverrideStore(*adminOverridesPath)
 	algorithms := controlplane.NewAlgorithmStore(*adminAlgorithmsPath)
-	srv := controlplane.NewServer(provider, overrides, algorithms)
+	routes := controlplane.NewRouteStore(*adminRoutesPath)
+	srv := controlplane.NewServer(provider, overrides, algorithms, routes)
 	go srv.Run(ctx, *reconcileInterval)
 
 	if !*adminDisable {

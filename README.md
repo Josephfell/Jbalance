@@ -7,9 +7,12 @@ xDS, Istio) use:
 - **Control plane** (`cmd/controlplane`) watches a backend pool source and
   streams backend list updates to connected data planes over gRPC. It never
   touches traffic itself.
-- **Data plane** (`cmd/dataplane`) is a "dumb" L7 HTTP reverse proxy. It has
-  no knowledge of where backends come from — it just proxies to whatever
-  backend list the control plane most recently pushed it, using whichever
+- **Data plane** (`cmd/dataplane`) is a "dumb" L7 HTTP reverse proxy. Every
+  instance has a default backend group (`-group`), but can route different
+  requests (by host, path prefix, and/or method) to other groups per the
+  control plane's L7 route table — it has no knowledge of where backends
+  come from either way, just proxying to whatever backend list the control
+  plane most recently pushed for the resolved group, using whichever
   load-balancing algorithm (weighted round robin, least connections, or
   random) the control plane has selected for that group.
 
@@ -207,6 +210,48 @@ store file only exists inside that container's writable layer otherwise.
   limiting keys on the real client IP rather than the proxy's.
 - Disable it entirely with `-admin-disable` if you don't want the web UI
   running at all.
+
+## L7 routing
+
+By default, a data plane instance is pinned to a single backend group
+(`-group`) for its entire lifetime — every request it proxies goes to that
+one group. **Routes**, in the admin web UI, lets a global L7 route table
+send different requests to different groups from that same instance and
+listener, without running a separate data plane per group.
+
+Each rule matches on:
+- **Host** — exact match; blank or `*` matches any host.
+- **Path prefix** — a literal prefix (e.g. `/api/`); blank or `/` matches
+  every path. Not a pattern language — deliberately simple for a first cut.
+- **Methods** — a comma-separated list (e.g. `GET, POST`); blank matches
+  any method.
+
+and, if matched, sends the request to the rule's **target group** instead
+of the instance's default. Rules are evaluated top to bottom; the first
+match wins, and the routes editor's row order is that evaluation order.
+An empty table — or a request matching no rule — falls back to the
+instance's own `-group`, so upgrading to a version with L7 routing changes
+nothing for a deployment that never configures a route.
+
+The route table is global (not per-group) and pushed to every connected
+data plane instance the moment it's saved, over its own gRPC stream
+(`StreamRoutes`, alongside each group's `StreamBackends` stream). A data
+plane instance discovers additional groups referenced by a route lazily —
+the first request that actually resolves to a group it isn't already
+subscribed to triggers that group's subscription, health checking, and
+health reporting to start, exactly as if `-group` had named it from the
+start. Stored in a local JSON file (`-admin-routes-path`, default
+`/var/lib/go-loadbalancer/routes.json`), same pattern as overrides and
+algorithm selection.
+
+**Current limitation:** the admin UI's Fleet view shows one group per
+instance ID, taken from its most recently opened `StreamBackends` stream —
+an instance now proxying to multiple groups via routing will show
+whichever group it subscribed to last, not the full list. Fixing this
+would mean tracking group per-stream rather than per-instance in the
+Fleet view; noted as a follow-up rather than blocking this feature, since
+it's a display-only gap and doesn't affect actual routing/proxying
+behavior.
 
 ## Azure VMSS provider
 

@@ -20,6 +20,14 @@ service ControlPlane {
   // visibility into backend health on its own — this is how that
   // information flows back, so it can be surfaced in the admin web UI.
   rpc ReportHealth(HealthReport) returns (HealthReportAck);
+
+  // StreamRoutes opens a long-lived stream and pushes the current L7
+  // route table, then a new one every time it changes. Unlike
+  // StreamBackends, the route table is global (not scoped to a group) —
+  // it's how one data plane instance can route different requests to
+  // different backend groups from a single listener, rather than being
+  // pinned to a single group for its entire lifetime.
+  rpc StreamRoutes(StreamRoutesRequest) returns (stream RouteTable);
 }
 
 message StreamBackendsRequest {
@@ -64,3 +72,38 @@ message HealthReport {
 }
 
 message HealthReportAck {}
+
+message StreamRoutesRequest {
+  // Human-readable identifier for the connecting data plane instance,
+  // used only for control plane logging/observability.
+  string instance_id = 1;
+}
+
+message Route {
+  // Host to match, exact string. "*" or empty matches any host — a
+  // data plane with a single route relying on the default group
+  // shouldn't need to specify a host at all.
+  string host = 1;
+  // Path prefix to match, e.g. "/api/". "/" matches every path.
+  // Evaluated as a literal prefix, not a pattern language — kept
+  // deliberately simple for a first cut of L7 routing.
+  string path_prefix = 2;
+  // HTTP methods this rule applies to. Empty means any method.
+  repeated string methods = 3;
+  // Backend group a matching request is proxied to.
+  string target_group = 4;
+  // Display name/comment for the admin UI; not evaluated.
+  string name = 5;
+}
+
+message RouteTable {
+  // Rules in evaluation order — the data plane checks them top to bottom
+  // and uses the first match. A request matching no rule falls back to
+  // the data plane's own -group flag, so an instance with an empty (or
+  // unreachable) route table keeps behaving exactly as it did before L7
+  // routing existed.
+  repeated Route routes = 1;
+  // Monotonically increasing version number, mirroring BackendSet.version
+  // — lets the data plane detect and ignore stale/out-of-order updates.
+  int64 version = 2;
+}
