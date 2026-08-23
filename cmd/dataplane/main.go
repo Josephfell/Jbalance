@@ -1,8 +1,17 @@
-// Command dataplane runs an L7 HTTP reverse proxy instance. It connects to
-// a control plane over gRPC, subscribes to updates for a named backend
-// group, and proxies incoming HTTP requests to whichever backends the
-// control plane currently reports for that group — no static config, no
-// polling, just a live push-based backend list.
+// Command dataplane runs a data plane proxy instance, in one of two
+// modes selected by -protocol:
+//
+//   - "http" (default): an L7 HTTP reverse proxy, with L7 routing
+//     (host/path/method -> backend group) and cookie-based sticky
+//     sessions available.
+//   - "tcp": an L4 raw TCP proxy, for non-HTTP protocols. Pinned to a
+//     single backend group for its lifetime — L7 routing and sticky
+//     sessions don't apply at this layer.
+//
+// Either way, it connects to a control plane over gRPC, subscribes to
+// updates for its backend group(s), and proxies incoming traffic to
+// whichever backends the control plane currently reports — no static
+// config, no polling, just a live push-based backend list.
 package main
 
 import (
@@ -10,6 +19,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -27,6 +37,7 @@ import (
 // its usage string (e.g. from a Docker Compose env_file) — an explicitly
 // passed flag always takes precedence over the environment.
 func main() {
+	protocol := flag.String("protocol", envflag.String("LB_PROTOCOL", "http"), "which proxy mode to run: 'http' (L7, supports routing and sticky sessions) or 'tcp' (L4, raw byte forwarding, single backend group) [env: LB_PROTOCOL]")
 	listenAddr := flag.String("listen-addr", envflag.String("LB_LISTEN_ADDR", ":8080"), "address for this data plane instance to accept incoming traffic on [env: LB_LISTEN_ADDR]")
 	controlPlaneAddr := flag.String("control-plane-addr", envflag.String("LB_CONTROL_PLANE_ADDR", "localhost:9090"), "address of the control plane's gRPC server [env: LB_CONTROL_PLANE_ADDR]")
 	group := flag.String("group", envflag.String("LB_GROUP", "web-tier"), "backend group this data plane instance serves traffic for [env: LB_GROUP]")
@@ -70,12 +81,19 @@ func main() {
 		log.Println("dataplane: WARNING connecting to control plane without TLS — use -control-plane-tls outside of local development.")
 	}
 
+	if *protocol != "http" && *protocol != "tcp" {
+		log.Fatalf("dataplane: unknown -protocol %q (must be 'http' or 'tcp')", *protocol)
+	}
+
 	// groups owns one BackendList (+ Subscriber, HealthChecker,
 	// HealthReporter) per backend group this instance ends up proxying
 	// to. -group's subscription is started eagerly below so an instance
 	// with no L7 routes configured behaves exactly as before; any
 	// additional group referenced by a route rule is started lazily, the
-	// first time a request actually resolves to it.
+	// first time a request actually resolves to it. (L4/tcp mode never
+	// references any group beyond -group — routing is an L7-only concept
+	// — but reuses the same GroupManager for its health
+	// checking/reporting.)
 	groups := dataplane.NewGroupManager(ctx, *controlPlaneAddr, id, cpTLSConfig, dataplane.HealthCheckConfig{
 		Interval:         *healthCheckInterval,
 		Timeout:          *healthCheckTimeout,
@@ -83,6 +101,11 @@ func main() {
 		SuccessThreshold: *healthyThreshold,
 	}, *healthReportInterval)
 	defaultBackends := groups.Ensure(*group)
+
+	if *protocol == "tcp" {
+		runTCP(ctx, id, *group, *listenAddr, *controlPlaneAddr, defaultBackends, *httpTLSCert, *httpTLSKey)
+		return
+	}
 
 	routes := dataplane.NewRouteTable(*group)
 	routeSub := dataplane.NewRouteSubscriber(*controlPlaneAddr, id, routes, cpTLSConfig)
@@ -137,5 +160,42 @@ func main() {
 	}
 	if serveErr != nil && serveErr != http.ErrServerClosed {
 		log.Fatalf("dataplane: HTTP server error: %v", serveErr)
+	}
+}
+
+// runTCP runs the L4 (raw TCP) proxy loop. Unlike the HTTP path, there is
+// no L7 routing (a TCP proxy has no visibility into what's inside the
+// bytes it forwards) and no debug/healthz HTTP endpoints — group is the
+// only backend group this listener will ever proxy to, for its entire
+// lifetime, exactly like an L7 data plane instance before routing existed.
+func runTCP(ctx context.Context, id, group, listenAddr, controlPlaneAddr string, backends *dataplane.BackendList, tlsCert, tlsKey string) {
+	var ln net.Listener
+	var err error
+	if tlsCert != "" {
+		cert, certErr := tls.LoadX509KeyPair(tlsCert, tlsKey)
+		if certErr != nil {
+			log.Fatalf("dataplane: failed to load TCP listener TLS cert/key: %v", certErr)
+		}
+		log.Println("dataplane: TCP listener TLS enabled")
+		ln, err = tls.Listen("tcp", listenAddr, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	} else {
+		log.Println("dataplane: WARNING TCP listener running without TLS — use -http-tls-cert/-http-tls-key outside of local development.")
+		ln, err = net.Listen("tcp", listenAddr)
+	}
+	if err != nil {
+		log.Fatalf("dataplane: failed to listen on %s: %v", listenAddr, err)
+	}
+
+	go func() {
+		<-ctx.Done()
+		log.Println("dataplane: shutting down TCP listener...")
+		_ = ln.Close()
+	}()
+
+	log.Printf("dataplane: instance %q serving group %q (tcp) on %s, control plane at %s", id, group, listenAddr, controlPlaneAddr)
+
+	proxy := dataplane.NewTCPProxy(backends)
+	if err := proxy.Serve(ctx, ln); err != nil {
+		log.Fatalf("dataplane: TCP proxy error: %v", err)
 	}
 }

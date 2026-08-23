@@ -1,4 +1,4 @@
-# Go Load Balancer — xDS-style control plane + L7 data plane
+# Go Load Balancer — xDS-style control plane + L4/L7 data plane
 
 A small, hybrid-cloud-aware load balancer split into a control plane and
 data plane, the same architectural pattern real service meshes (Envoy's
@@ -7,14 +7,25 @@ xDS, Istio) use:
 - **Control plane** (`cmd/controlplane`) watches a backend pool source and
   streams backend list updates to connected data planes over gRPC. It never
   touches traffic itself.
-- **Data plane** (`cmd/dataplane`) is a "dumb" L7 HTTP reverse proxy. Every
-  instance has a default backend group (`-group`), but can route different
-  requests (by host, path prefix, and/or method) to other groups per the
-  control plane's L7 route table — it has no knowledge of where backends
-  come from either way, just proxying to whatever backend list the control
-  plane most recently pushed for the resolved group, using whichever
-  load-balancing algorithm (weighted round robin, least connections, or
-  random) the control plane has selected for that group.
+- **Data plane** (`cmd/dataplane`) is a "dumb" proxy that runs in one of two
+  modes, selected by `-protocol`:
+  - **`http`** (default): an L7 reverse proxy. Every instance has a default
+    backend group (`-group`), but can route different requests (by host,
+    path prefix, and/or method) to other groups per the control plane's L7
+    route table, and supports cookie-based sticky sessions per group.
+  - **`tcp`**: an L4 raw proxy that forwards bytes bidirectionally to a
+    single backend group, for non-HTTP protocols (databases, custom TCP
+    services, TLS passthrough). No routing or sticky sessions — a TCP
+    proxy has no visibility into what's inside the connection.
+
+  Either way, the data plane has no knowledge of where backends come
+  from — it just proxies to whatever backend list the control plane most
+  recently pushed for the resolved group, using whichever load-balancing
+  algorithm (weighted round robin, least connections, or random) the
+  control plane has selected for that group. Health checking (TCP
+  connect probes), health reporting to the admin UI, and the control
+  plane's push model work identically in both modes, since they're
+  protocol-agnostic to begin with.
 
 This split means the control plane's backend-discovery logic (today: a fake
 provider; eventually: Azure VMSS, vCenter, etc.) is completely decoupled
@@ -47,6 +58,9 @@ Requires Go 1.26+.
 go run ./scripts/fake_backend.go -port 8081
 go run ./scripts/fake_backend.go -port 8082
 go run ./scripts/fake_backend.go -port 8083
+# For L4/TCP testing instead, use ./scripts/echo_backend (a plain TCP echo
+# server) rather than fake_backend.go (which speaks HTTP):
+#   go run ./scripts/echo_backend -port 8081
 ```
 
 Each just responds with "hello from backend on port <port>" — enough to
@@ -90,7 +104,9 @@ internal/pool/       backend pool Provider interface + fake/testing impl
 internal/controlplane/  gRPC server: reconciliation loop + subscriber fan-out
 internal/dataplane/  gRPC client, weighted backend list, HTTP reverse proxy
 proto/               gRPC service definition + generated Go stubs
-scripts/             fake_backend.go — manual-testing helper, not part of the main build
+scripts/             manual-testing helpers, not part of the main build:
+                     fake_backend.go (plain HTTP), echo_backend/ (plain TCP,
+                     for exercising -protocol=tcp)
 ```
 
 ## Admin web management UI
@@ -296,6 +312,47 @@ per-group settings.
 *backend group*, not per route. If a route table sends different
 requests from the same client to different groups, each group's affinity
 (if enabled) is tracked independently via its own cookie.
+
+## L4 (raw TCP) mode
+
+Pass `-protocol=tcp` (or `LB_PROTOCOL=tcp`) to run a data plane instance
+as a raw TCP proxy instead of the default HTTP reverse proxy:
+
+```bash
+go run ./cmd/dataplane -protocol=tcp -group=web-tier -listen-addr=:8080
+```
+
+Each accepted TCP connection selects a backend from `-group` using the
+same weighted algorithm (round robin / least connections / random) and
+health-checking the control plane already applies in HTTP mode, then
+pipes bytes bidirectionally between the client and that backend for the
+connection's entire lifetime — no re-selection happens partway through a
+connection, since a raw TCP proxy has no concept of "request" within one.
+
+Use this for anything that isn't HTTP: a database's wire protocol, a
+custom TCP service, or terminating nothing and passing TLS straight
+through to backends that handle it themselves.
+
+**What doesn't apply in `tcp` mode:**
+- **L7 routing** — a TCP proxy has no visibility into what's inside the
+  bytes it forwards, so there's no host/path/method to route on. A `tcp`
+  instance is pinned to its `-group` for its entire lifetime, the same
+  way an HTTP data plane instance was before L7 routing existed.
+- **Sticky sessions** — these work via an HTTP cookie, which doesn't
+  exist at this layer. Ordinary TCP connection semantics already provide
+  a form of "stickiness" for the life of one connection, since every
+  byte on a connection goes to the same backend by construction.
+
+**What still works exactly the same:** health checking, the admin web
+UI's Fleet view (a `tcp` instance shows up there identically, since it
+uses the same control-plane subscription and health-reporting machinery
+as an `http` instance), weight overrides, drain, and algorithm
+selection — all of it is backend-group-level state that both proxy
+modes read from the same `BackendList`.
+
+`-http-tls-cert`/`-http-tls-key` (despite the flag name, shared with
+`tcp` mode) terminate TLS at the listener in either mode; leave them
+unset to accept plaintext TCP.
 
 ## Azure VMSS provider
 
