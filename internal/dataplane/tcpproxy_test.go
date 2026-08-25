@@ -91,7 +91,7 @@ func TestTCPProxy_ForwardsToBackend(t *testing.T) {
 	backends := NewBackendList()
 	backends.Update(&pb.BackendSet{Group: "tcp-tier", Version: 1, Backends: []*pb.Backend{{Address: backendAddr, Weight: 1}}})
 
-	proxyAddr := startTCPProxyListener(t, NewTCPProxy(backends), ctx)
+	proxyAddr := startTCPProxyListener(t, NewTCPProxy("tcp-tier", backends, nil), ctx)
 
 	got := dialAndExchange(t, proxyAddr, "hello")
 	if got != "echo:hello" {
@@ -114,7 +114,7 @@ func TestTCPProxy_DistributesAcrossBackends(t *testing.T) {
 		Backends: []*pb.Backend{{Address: addrA, Weight: 1}, {Address: addrB, Weight: 1}},
 	})
 
-	proxyAddr := startTCPProxyListener(t, NewTCPProxy(backends), ctx)
+	proxyAddr := startTCPProxyListener(t, NewTCPProxy("tcp-tier", backends, nil), ctx)
 
 	seen := map[string]bool{}
 	for i := 0; i < 4; i++ {
@@ -139,7 +139,7 @@ func TestTCPProxy_NoHealthyBackendsClosesConnection(t *testing.T) {
 
 	backends := NewBackendList() // never updated — no backends at all
 
-	proxyAddr := startTCPProxyListener(t, NewTCPProxy(backends), ctx)
+	proxyAddr := startTCPProxyListener(t, NewTCPProxy("tcp-tier", backends, nil), ctx)
 
 	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
 	if err != nil {
@@ -171,7 +171,7 @@ func TestTCPProxy_SkipsUnhealthyBackend(t *testing.T) {
 	})
 	backends.SetHealth(addrA, false)
 
-	proxyAddr := startTCPProxyListener(t, NewTCPProxy(backends), ctx)
+	proxyAddr := startTCPProxyListener(t, NewTCPProxy("tcp-tier", backends, nil), ctx)
 
 	for i := 0; i < 3; i++ {
 		got := dialAndExchange(t, proxyAddr, "ping")
@@ -182,7 +182,7 @@ func TestTCPProxy_SkipsUnhealthyBackend(t *testing.T) {
 }
 
 func TestTCPProxy_DialTimeoutDefault(t *testing.T) {
-	p := NewTCPProxy(NewBackendList())
+	p := NewTCPProxy("tcp-tier", NewBackendList(), nil)
 	if p.dialTimeout() != 5*time.Second {
 		t.Errorf("expected default dial timeout of 5s, got %v", p.dialTimeout())
 	}

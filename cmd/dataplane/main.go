@@ -28,6 +28,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/Josephfell/Jbalance/internal/dataplane"
 	"github.com/Josephfell/Jbalance/internal/envflag"
 	"github.com/Josephfell/Jbalance/internal/tlsutil"
@@ -56,6 +59,10 @@ func main() {
 	httpTLSKey := flag.String("http-tls-key", envflag.String("LB_HTTP_TLS_KEY", ""), "path to the TLS private key matching -http-tls-cert [env: LB_HTTP_TLS_KEY]")
 
 	healthReportInterval := flag.Duration("health-report-interval", envflag.Duration("LB_HEALTH_REPORT_INTERVAL", 10*time.Second), "how often to report backend health status back to the control plane, for display in the admin web UI [env: LB_HEALTH_REPORT_INTERVAL]")
+
+	metricsAddr := flag.String("metrics-addr", envflag.String("LB_METRICS_ADDR", ":9100"), "address to serve Prometheus metrics on (/metrics), separate from the traffic listener so metrics scraping never competes with proxied paths/connections [env: LB_METRICS_ADDR]")
+	metricsDisable := flag.Bool("metrics-disable", envflag.Bool("LB_METRICS_DISABLE", false), "disable the Prometheus /metrics endpoint entirely [env: LB_METRICS_DISABLE]")
+	metricsReportInterval := flag.Duration("metrics-report-interval", envflag.Duration("LB_METRICS_REPORT_INTERVAL", 10*time.Second), "how often to push a traffic summary to the control plane, for display in the admin web UI's live charts [env: LB_METRICS_REPORT_INTERVAL]")
 	flag.Parse()
 
 	id := *instanceID
@@ -102,8 +109,26 @@ func main() {
 	}, *healthReportInterval)
 	defaultBackends := groups.Ensure(*group)
 
+	var metrics *dataplane.Metrics
+	if !*metricsDisable {
+		registry := prometheus.NewRegistry()
+		metrics = dataplane.NewMetrics(registry)
+		dataplane.RegisterBackendsCollector(registry, groups)
+		startMetricsServer(ctx, *metricsAddr, registry)
+
+		// Push a lightweight summary to the control plane too, so the
+		// admin web UI's live charts have data without needing a
+		// Prometheus server scraping this instance's /metrics — the
+		// control plane has no route back to reach this instance
+		// directly (only the reverse connection exists).
+		metricsReporter := dataplane.NewMetricsReporter(*controlPlaneAddr, id, metrics, cpTLSConfig, *metricsReportInterval)
+		go metricsReporter.Run(ctx)
+	} else {
+		log.Println("dataplane: metrics endpoint disabled (-metrics-disable)")
+	}
+
 	if *protocol == "tcp" {
-		runTCP(ctx, id, *group, *listenAddr, *controlPlaneAddr, defaultBackends, *httpTLSCert, *httpTLSKey)
+		runTCP(ctx, id, *group, *listenAddr, *controlPlaneAddr, defaultBackends, metrics, *httpTLSCert, *httpTLSKey)
 		return
 	}
 
@@ -111,7 +136,7 @@ func main() {
 	routeSub := dataplane.NewRouteSubscriber(*controlPlaneAddr, id, routes, cpTLSConfig)
 	go routeSub.Run(ctx)
 
-	proxy := dataplane.NewProxy(routes, groups)
+	proxy := dataplane.NewProxy(routes, groups, metrics)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", proxy.Handler())
@@ -168,7 +193,7 @@ func main() {
 // bytes it forwards) and no debug/healthz HTTP endpoints — group is the
 // only backend group this listener will ever proxy to, for its entire
 // lifetime, exactly like an L7 data plane instance before routing existed.
-func runTCP(ctx context.Context, id, group, listenAddr, controlPlaneAddr string, backends *dataplane.BackendList, tlsCert, tlsKey string) {
+func runTCP(ctx context.Context, id, group, listenAddr, controlPlaneAddr string, backends *dataplane.BackendList, metrics *dataplane.Metrics, tlsCert, tlsKey string) {
 	var ln net.Listener
 	var err error
 	if tlsCert != "" {
@@ -194,8 +219,41 @@ func runTCP(ctx context.Context, id, group, listenAddr, controlPlaneAddr string,
 
 	log.Printf("dataplane: instance %q serving group %q (tcp) on %s, control plane at %s", id, group, listenAddr, controlPlaneAddr)
 
-	proxy := dataplane.NewTCPProxy(backends)
+	proxy := dataplane.NewTCPProxy(group, backends, metrics)
 	if err := proxy.Serve(ctx, ln); err != nil {
 		log.Fatalf("dataplane: TCP proxy error: %v", err)
 	}
+}
+
+// startMetricsServer starts a small dedicated HTTP server exposing
+// registry via /metrics, on its own listener separate from the traffic
+// port — deliberate, so a Prometheus scrape can never compete with (or
+// be confused for) actual proxied HTTP requests, and so the L4/tcp mode
+// (which otherwise has no HTTP server at all) still gets metrics without
+// needing one stood up just for this. Runs in the background; a failure
+// to bind is logged but not fatal, since metrics are an observability
+// nice-to-have, not something that should take down request proxying.
+func startMetricsServer(ctx context.Context, addr string, registry *prometheus.Registry) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	go func() {
+		log.Printf("dataplane: metrics endpoint listening on %s/metrics", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("dataplane: metrics server error: %v", err)
+		}
+	}()
 }

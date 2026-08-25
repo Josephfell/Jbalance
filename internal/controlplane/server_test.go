@@ -465,3 +465,87 @@ func TestServer_Sticky_DefaultsToDisabled(t *testing.T) {
 		t.Error("expected an unconfigured group's sticky config to default to disabled")
 	}
 }
+
+func TestServer_ReportMetrics_AggregatesAcrossInstances(t *testing.T) {
+	srv := NewServer(nil, nil, nil, nil, nil)
+	ctx := context.Background()
+
+	_, err := srv.ReportMetrics(ctx, &pb.MetricsReport{
+		InstanceId: "dp-1",
+		Groups: []*pb.GroupMetrics{
+			{Group: "web-tier", RequestsTotal: 100, Errors_5XxTotal: 2, ActiveConnections: 5, AvgDurationMs: 10},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReportMetrics() error: %v", err)
+	}
+
+	_, err = srv.ReportMetrics(ctx, &pb.MetricsReport{
+		InstanceId: "dp-2",
+		Groups: []*pb.GroupMetrics{
+			{Group: "web-tier", RequestsTotal: 50, Errors_5XxTotal: 1, ActiveConnections: 3, AvgDurationMs: 20},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReportMetrics() error: %v", err)
+	}
+
+	snaps := srv.MetricsSnapshot()
+	if len(snaps) != 1 {
+		t.Fatalf("expected 1 group snapshot, got %d", len(snaps))
+	}
+	s := snaps[0]
+	if s.RequestsTotal != 150 {
+		t.Errorf("expected requests summed to 150, got %d", s.RequestsTotal)
+	}
+	if s.Errors5xxTotal != 3 {
+		t.Errorf("expected errors summed to 3, got %d", s.Errors5xxTotal)
+	}
+	if s.ActiveConnections != 8 {
+		t.Errorf("expected active connections summed to 8, got %d", s.ActiveConnections)
+	}
+	if s.AvgDurationMs != 15 {
+		t.Errorf("expected avg duration averaged to 15, got %v", s.AvgDurationMs)
+	}
+	if s.ReportingInstances != 2 {
+		t.Errorf("expected 2 reporting instances, got %d", s.ReportingInstances)
+	}
+}
+
+func TestServer_MetricsSnapshot_OmitsGroupsWithNoReport(t *testing.T) {
+	srv := NewServer(nil, nil, nil, nil, nil)
+	if got := srv.MetricsSnapshot(); len(got) != 0 {
+		t.Errorf("expected no snapshot entries before any ReportMetrics call, got %v", got)
+	}
+}
+
+func TestServer_MetricsSnapshot_ExcludesStaleReports(t *testing.T) {
+	srv := NewServer(nil, nil, nil, nil, nil)
+
+	srv.metricsMu.Lock()
+	srv.metrics[metricsKey{instanceID: "dp-1", group: "web-tier"}] = metricsEntry{
+		requestsTotal: 100,
+		reportedAt:    time.Now().Add(-time.Hour), // long past metricsReportMaxAge
+	}
+	srv.metricsMu.Unlock()
+
+	if got := srv.MetricsSnapshot(); len(got) != 0 {
+		t.Errorf("expected a stale report to be excluded, got %v", got)
+	}
+}
+
+func TestServer_ReportMetrics_UpdatesHistory(t *testing.T) {
+	srv := NewServer(nil, nil, nil, nil, nil)
+	_, err := srv.ReportMetrics(context.Background(), &pb.MetricsReport{
+		InstanceId: "dp-1",
+		Groups:     []*pb.GroupMetrics{{Group: "web-tier", RequestsTotal: 42}},
+	})
+	if err != nil {
+		t.Fatalf("ReportMetrics() error: %v", err)
+	}
+
+	history := srv.MetricsHistory(10)
+	if len(history) != 1 {
+		t.Fatalf("expected 1 history point after a ReportMetrics call, got %d", len(history))
+	}
+}
