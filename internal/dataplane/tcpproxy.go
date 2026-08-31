@@ -34,13 +34,52 @@ type TCPProxy struct {
 	// take before the client connection is closed. Defaults to 5s if
 	// zero.
 	DialTimeout time.Duration
+
+	// mu guards the in-flight connection accounting used by Drain.
+	// A mutex-guarded counter (rather than a sync.WaitGroup) is used
+	// deliberately: WaitGroup forbids Add being called concurrently with
+	// Wait, which is exactly the shutdown race between a connection being
+	// accepted and Drain starting to wait. The counter increments under
+	// the same lock Drain waits under, so the two can never race.
+	mu       sync.Mutex
+	inflight int
+	idle     chan struct{} // closed-and-replaced signal fired whenever inflight hits 0
 }
 
 // NewTCPProxy creates an L4 proxy that selects backends from backends,
 // labelling metrics with group. metrics may be nil, in which case no
 // metrics are recorded.
 func NewTCPProxy(group string, backends *BackendList, metrics *Metrics) *TCPProxy {
-	return &TCPProxy{group: group, backends: backends, metrics: metrics}
+	return &TCPProxy{
+		group:    group,
+		backends: backends,
+		metrics:  metrics,
+		idle:     make(chan struct{}),
+	}
+}
+
+// connStarted records that a new proxied connection is in flight. Called
+// from Serve's single-threaded accept loop, before the handler goroutine
+// is launched, so the count is incremented before there is any chance for
+// Drain to observe zero and return early.
+func (p *TCPProxy) connStarted() {
+	p.mu.Lock()
+	p.inflight++
+	p.mu.Unlock()
+}
+
+// connFinished records that a proxied connection has completed, signalling
+// any waiting Drain when the last one drains.
+func (p *TCPProxy) connFinished() {
+	p.mu.Lock()
+	p.inflight--
+	if p.inflight == 0 {
+		// Fire the idle signal: close the current channel and install a
+		// fresh one for the next drain cycle.
+		close(p.idle)
+		p.idle = make(chan struct{})
+	}
+	p.mu.Unlock()
 }
 
 func (p *TCPProxy) dialTimeout() time.Duration {
@@ -64,11 +103,55 @@ func (p *TCPProxy) Serve(ctx context.Context, ln net.Listener) error {
 			}
 			return err
 		}
+		// Count the connection here, in the single-threaded accept loop,
+		// BEFORE launching the handler — so it is impossible for Drain to
+		// see inflight==0 for a connection that has been accepted but
+		// whose goroutine hasn't started yet.
+		p.connStarted()
 		go p.handleConn(ctx, conn)
 	}
 }
 
+// Drain waits for all in-flight proxied connections to finish, up to
+// grace. It returns once every connection has completed or the grace
+// period elapses (whichever comes first) — call it after closing the
+// listener (which stops new Accepts) so that existing connections are
+// allowed to complete rather than being cut off mid-transfer. Returns
+// true if all connections drained within the grace period, false if the
+// deadline was hit with connections still in flight. A non-positive grace
+// returns immediately.
+func (p *TCPProxy) Drain(grace time.Duration) bool {
+	p.mu.Lock()
+	if p.inflight == 0 {
+		p.mu.Unlock()
+		return true
+	}
+	idle := p.idle // capture the current idle channel under the lock
+	p.mu.Unlock()
+
+	if grace <= 0 {
+		return false
+	}
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-idle:
+		return true
+	case <-timer.C:
+		// Re-check under the lock in case the last connection drained
+		// exactly as the timer fired.
+		p.mu.Lock()
+		drained := p.inflight == 0
+		p.mu.Unlock()
+		return drained
+	}
+}
+
 func (p *TCPProxy) handleConn(ctx context.Context, client net.Conn) {
+	// The connection was already counted in Serve via connStarted before
+	// this goroutine launched; balance it here.
+	defer p.connFinished()
 	defer func() { _ = client.Close() }()
 
 	addr, ok := p.backends.Next()

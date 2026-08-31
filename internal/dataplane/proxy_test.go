@@ -3,8 +3,11 @@ package dataplane
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,7 +37,7 @@ func TestProxy_RoutesToDefaultGroupWithNoRoutes(t *testing.T) {
 	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
 	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: addr, Weight: 1}}})
 
-	proxy := NewProxy(routes, groups, nil)
+	proxy := NewProxy(routes, groups, nil, ProxyConfig{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/anything", nil)
 	proxy.Handler().ServeHTTP(rec, req)
@@ -65,7 +68,7 @@ func TestProxy_RoutesByPathPrefix(t *testing.T) {
 	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: webAddr, Weight: 1}}})
 	groups.Ensure("api-tier").Update(&pb.BackendSet{Group: "api-tier", Version: 1, Backends: []*pb.Backend{{Address: apiAddr, Weight: 1}}})
 
-	proxy := NewProxy(routes, groups, nil)
+	proxy := NewProxy(routes, groups, nil, ProxyConfig{})
 	handler := proxy.Handler()
 
 	rec1 := httptest.NewRecorder()
@@ -99,7 +102,7 @@ func TestProxy_RoutesByHost(t *testing.T) {
 	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: webAddr, Weight: 1}}})
 	groups.Ensure("static-edge").Update(&pb.BackendSet{Group: "static-edge", Version: 1, Backends: []*pb.Backend{{Address: staticAddr, Weight: 1}}})
 
-	proxy := NewProxy(routes, groups, nil)
+	proxy := NewProxy(routes, groups, nil, ProxyConfig{})
 	handler := proxy.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/logo.png", nil)
@@ -121,7 +124,7 @@ func TestProxy_ReturnsServiceUnavailableWhenResolvedGroupHasNoBackends(t *testin
 	// Deliberately never call Update — the group exists but has no backends.
 	groups.Ensure("web-tier")
 
-	proxy := NewProxy(routes, groups, nil)
+	proxy := NewProxy(routes, groups, nil, ProxyConfig{})
 	rec := httptest.NewRecorder()
 	proxy.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
@@ -147,7 +150,7 @@ func TestProxy_LazilyEnsuresGroupReferencedOnlyByARoute(t *testing.T) {
 	// proxy's own call to groups.Ensure inside Handler must create it on
 	// demand. Populate its backends only after constructing the proxy, to
 	// prove the lazy path (not a pre-existing group) is what's exercised.
-	proxy := NewProxy(routes, groups, nil)
+	proxy := NewProxy(routes, groups, nil, ProxyConfig{})
 
 	groups.Ensure("api-tier").Update(&pb.BackendSet{Group: "api-tier", Version: 1, Backends: []*pb.Backend{{Address: apiAddr, Weight: 1}}})
 
@@ -177,7 +180,7 @@ func TestProxy_StickySessions_PinsToSameBackendAcrossRequests(t *testing.T) {
 		Backends: []*pb.Backend{{Address: addrA, Weight: 1}, {Address: addrB, Weight: 1}},
 	})
 
-	proxy := NewProxy(routes, groups, nil)
+	proxy := NewProxy(routes, groups, nil, ProxyConfig{})
 	handler := proxy.Handler()
 
 	// First request: no cookie yet, gets pinned to whichever backend Next()
@@ -228,7 +231,7 @@ func TestProxy_StickySessions_FallsBackWhenPinnedBackendUnhealthy(t *testing.T) 
 		Backends: []*pb.Backend{{Address: addrA, Weight: 1}, {Address: addrB, Weight: 1}},
 	})
 
-	proxy := NewProxy(routes, groups, nil)
+	proxy := NewProxy(routes, groups, nil, ProxyConfig{})
 	handler := proxy.Handler()
 
 	// Pin to addrA explicitly via a forged cookie, then mark it unhealthy.
@@ -274,7 +277,7 @@ func TestProxy_StickySessions_ForgedCookieCannotEscapeGroup(t *testing.T) {
 		Backends: []*pb.Backend{{Address: addrA, Weight: 1}},
 	})
 
-	proxy := NewProxy(routes, groups, nil)
+	proxy := NewProxy(routes, groups, nil, ProxyConfig{})
 	handler := proxy.Handler()
 
 	// A cookie naming an address that was never part of this group at all
@@ -306,13 +309,129 @@ func TestProxy_NoStickyCookieSetWhenDisabled(t *testing.T) {
 		Backends: []*pb.Backend{{Address: addr, Weight: 1}},
 	})
 
-	proxy := NewProxy(routes, groups, nil)
+	proxy := NewProxy(routes, groups, nil, ProxyConfig{})
 	rec := httptest.NewRecorder()
 	proxy.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == "jb_affinity" || c.Name == "jb_test" {
 			t.Errorf("expected no affinity cookie to be set when sticky sessions are disabled, got %+v", c)
+		}
+	}
+}
+
+// deadBackendAddr returns an address that will refuse connections: it
+// binds a listener to grab a free port, then closes it, so dialing that
+// address fails at the connection level — exactly the failure a retry is
+// meant to route around.
+func deadBackendAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve a dead address: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return addr
+}
+
+func TestProxy_RetriesPastDeadBackend(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	liveAddr, cleanup := newTestBackend(t, "live")
+	defer cleanup()
+	dead := deadBackendAddr(t)
+
+	routes := NewRouteTable("web-tier")
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
+	// Dead backend listed first; with round-robin the first attempt hits
+	// it, and a retry must fall through to the live one.
+	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{
+		{Address: dead, Weight: 1},
+		{Address: liveAddr, Weight: 1},
+	}})
+
+	proxy := NewProxy(routes, groups, nil, ProxyConfig{MaxRetries: 2, RetryBackoff: time.Millisecond})
+	handler := proxy.Handler()
+
+	// Across several requests the dead backend will be selected first
+	// sometimes; every request should still succeed via retry.
+	for i := 0; i < 6; i++ {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200 via retry, got %d: %s", i, rec.Code, rec.Body.String())
+		}
+		if rec.Body.String() != "live" {
+			t.Fatalf("request %d: expected retry to reach the live backend, got %q", i, rec.Body.String())
+		}
+	}
+}
+
+func TestProxy_NoRetryReturnsBadGatewayOnDeadBackend(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dead := deadBackendAddr(t)
+
+	routes := NewRouteTable("web-tier")
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
+	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: dead, Weight: 1}}})
+
+	// MaxRetries=0: a single attempt against the only (dead) backend
+	// must surface as 502, not loop.
+	proxy := NewProxy(routes, groups, nil, ProxyConfig{MaxRetries: 0})
+	rec := httptest.NewRecorder()
+	proxy.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 with no retries against a dead backend, got %d", rec.Code)
+	}
+}
+
+func TestProxy_DoesNotRetryPOST(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dead := deadBackendAddr(t)
+
+	routes := NewRouteTable("web-tier")
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
+	// Only the dead backend, so a POST that (correctly) does NOT retry
+	// must fail with 502.
+	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: dead, Weight: 1}}})
+
+	proxy := NewProxy(routes, groups, nil, ProxyConfig{MaxRetries: 3, RetryBackoff: time.Millisecond})
+	rec := httptest.NewRecorder()
+	// A POST is not safely retryable.
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("payload"))
+	proxy.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected POST to a dead backend to fail with 502 (no retry), got %d", rec.Code)
+	}
+}
+
+func TestRequestRetryable(t *testing.T) {
+	cases := []struct {
+		method string
+		body   bool
+		want   bool
+	}{
+		{http.MethodGet, false, true},
+		{http.MethodHead, false, true},
+		{http.MethodOptions, false, true},
+		{http.MethodPost, false, false},
+		{http.MethodPut, false, false},
+		{http.MethodDelete, false, false},
+	}
+	for _, c := range cases {
+		var body io.Reader = http.NoBody
+		if c.body {
+			body = strings.NewReader("x")
+		}
+		req := httptest.NewRequest(c.method, "/", body)
+		if got := requestRetryable(req); got != c.want {
+			t.Errorf("requestRetryable(%s, body=%v) = %v, want %v", c.method, c.body, got, c.want)
 		}
 	}
 }
