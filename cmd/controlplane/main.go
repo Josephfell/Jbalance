@@ -39,7 +39,7 @@ func main() {
 	tlsKeyFile := flag.String("tls-key", envflag.String("LB_TLS_KEY", ""), "path to the TLS private key matching -tls-cert [env: LB_TLS_KEY]")
 	tlsClientCAFile := flag.String("tls-client-ca", envflag.String("LB_TLS_CLIENT_CA", ""), "path to a CA cert used to require and verify data plane client certificates (mutual TLS); if unset, any client can connect once TLS is enabled [env: LB_TLS_CLIENT_CA]")
 
-	providerKind := flag.String("provider", envflag.String("LB_PROVIDER", "fake"), "backend pool provider to use: 'fake' (local testing) or 'azure-vmss' [env: LB_PROVIDER]")
+	providerKind := flag.String("provider", envflag.String("LB_PROVIDER", "fake"), "backend pool provider to use: 'fake' (local testing), 'azure-vmss', or 'kubernetes' [env: LB_PROVIDER]")
 
 	// Fake provider settings.
 	simulateScaling := flag.Bool("simulate-scaling", envflag.Bool("LB_SIMULATE_SCALING", true), "(fake provider only) randomly add/remove backends on a timer to simulate scaling events [env: LB_SIMULATE_SCALING]")
@@ -50,6 +50,10 @@ func main() {
 	azureSubscriptionID := flag.String("azure-subscription-id", envflag.String("LB_AZURE_SUBSCRIPTION_ID", ""), "(azure-vmss provider only) Azure subscription ID [env: LB_AZURE_SUBSCRIPTION_ID]")
 	azureResourceGroup := flag.String("azure-resource-group", envflag.String("LB_AZURE_RESOURCE_GROUP", ""), "(azure-vmss provider only) resource group containing the scale set(s) [env: LB_AZURE_RESOURCE_GROUP]")
 	azureVMSSGroups := flag.String("azure-vmss-groups", envflag.String("LB_AZURE_VMSS_GROUPS", ""), "(azure-vmss provider only) comma-separated group specs: group:scaleSetName:port[:weight], e.g. 'web-tier:vmss-web:8080,api-tier:vmss-api:8081' [env: LB_AZURE_VMSS_GROUPS]")
+
+	// Kubernetes provider settings.
+	k8sGroups := flag.String("k8s-groups", envflag.String("LB_K8S_GROUPS", ""), "(kubernetes provider only) comma-separated group specs: group:namespace:service:port[:weight], e.g. 'web-tier:default:web:8080,api-tier:default:api:8081' [env: LB_K8S_GROUPS]")
+	k8sKubeconfig := flag.String("k8s-kubeconfig", envflag.String("LB_K8S_KUBECONFIG", ""), "(kubernetes provider only) explicit path to a kubeconfig file; if unset, uses in-cluster config when running as a pod, otherwise the default kubeconfig (KUBECONFIG env, then ~/.kube/config) [env: LB_K8S_KUBECONFIG]")
 
 	// Admin web UI settings.
 	adminAddr := flag.String("admin-addr", envflag.String("LB_ADMIN_ADDR", ":9091"), "address for the admin web management UI to listen on [env: LB_ADMIN_ADDR]")
@@ -78,6 +82,9 @@ func main() {
 		azureSubscriptionID: *azureSubscriptionID,
 		azureResourceGroup:  *azureResourceGroup,
 		azureVMSSGroups:     *azureVMSSGroups,
+
+		k8sGroups:     *k8sGroups,
+		k8sKubeconfig: *k8sKubeconfig,
 	})
 	if err != nil {
 		log.Fatalf("controlplane: %v", err)
@@ -235,6 +242,9 @@ type providerConfig struct {
 	azureSubscriptionID string
 	azureResourceGroup  string
 	azureVMSSGroups     string
+
+	k8sGroups     string
+	k8sKubeconfig string
 }
 
 // buildProvider constructs the configured pool.Provider. The returned
@@ -279,8 +289,24 @@ func buildProvider(ctx context.Context, kind string, cfg providerConfig) (pool.P
 		log.Printf("controlplane: using azure-vmss provider for %d group(s) in resource group %q", len(groups), cfg.azureResourceGroup)
 		return provider, nil, nil
 
+	case "kubernetes":
+		groups, err := pool.ParseKubernetesGroups(cfg.k8sGroups)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(groups) == 0 {
+			return nil, nil, fmt.Errorf("-k8s-groups (or LB_K8S_GROUPS) must specify at least one group")
+		}
+
+		provider, err := pool.NewKubernetesProvider(cfg.k8sKubeconfig, groups)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create kubernetes provider: %w", err)
+		}
+		log.Printf("controlplane: using kubernetes provider for %d group(s)", len(groups))
+		return provider, nil, nil
+
 	default:
-		return nil, nil, fmt.Errorf("unknown provider %q (must be 'fake' or 'azure-vmss')", kind)
+		return nil, nil, fmt.Errorf("unknown provider %q (must be 'fake', 'azure-vmss', or 'kubernetes')", kind)
 	}
 }
 

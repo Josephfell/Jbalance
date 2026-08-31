@@ -30,6 +30,10 @@ func (fakeStateProvider) SetSticky(context.Context, string, controlplane.StickyC
 	return nil
 }
 
+func (fakeStateProvider) MetricsSnapshot() []controlplane.GroupMetricsSnapshot { return nil }
+
+func (fakeStateProvider) MetricsHistory(int) []controlplane.HistoryPoint { return nil }
+
 func (fakeStateProvider) SetOverride(context.Context, string, string, *int32, bool) error {
 	return nil
 }
@@ -398,6 +402,8 @@ type spyStateProvider struct {
 	routes         []controlplane.Route
 	routesSaved    []controlplane.Route
 	stickyCalls    []stickyCall
+	metrics        []controlplane.GroupMetricsSnapshot
+	history        []controlplane.HistoryPoint
 }
 
 type stickyCall struct {
@@ -435,6 +441,10 @@ func (s *spyStateProvider) SetSticky(_ context.Context, group string, cfg contro
 	s.stickyCalls = append(s.stickyCalls, stickyCall{group, cfg})
 	return s.err
 }
+
+func (s *spyStateProvider) MetricsSnapshot() []controlplane.GroupMetricsSnapshot { return s.metrics }
+
+func (s *spyStateProvider) MetricsHistory(int) []controlplane.HistoryPoint { return s.history }
 
 func (s *spyStateProvider) SetOverride(_ context.Context, group, address string, weight *int32, drained bool) error {
 	s.overrideCalls = append(s.overrideCalls, overrideCall{group, address, weight, drained})
@@ -1134,5 +1144,61 @@ func TestHandler_StickySubmit_RequiresAuth(t *testing.T) {
 	}
 	if len(spy.stickyCalls) != 0 {
 		t.Errorf("expected no SetSticky call without auth, got %+v", spy.stickyCalls)
+	}
+}
+
+func TestHandler_MetricsJSON_RendersHistory(t *testing.T) {
+	srv, password, spy := newTestServerWithSpy(t)
+	now := time.Now()
+	spy.history = []controlplane.HistoryPoint{
+		{Time: now, RequestsDelta: 12, Errors5xxDelta: 1, ActiveConns: 4, AvgDurationMs: 8.5},
+	}
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics.json", nil)
+	req.AddCookie(session)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Header().Get("Content-Type"), "application/json") {
+		t.Errorf("expected JSON content type, got %q", rec.Header().Get("Content-Type"))
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"req":12`) || !strings.Contains(body, `"err":1`) || !strings.Contains(body, `"active":4`) {
+		t.Errorf("expected the rendered JSON to reflect the history point, got: %s", body)
+	}
+}
+
+func TestHandler_MetricsJSON_RequiresAuth(t *testing.T) {
+	srv, _, _ := newTestServerWithSpy(t)
+	req := httptest.NewRequest(http.MethodGet, "/metrics.json", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("expected an unauthenticated request to be redirected, got %d", rec.Code)
+	}
+}
+
+func TestHandler_Dashboard_RendersMetricsTable(t *testing.T) {
+	srv, password, spy := newTestServerWithSpy(t)
+	spy.metrics = []controlplane.GroupMetricsSnapshot{
+		{Group: "web-tier", RequestsTotal: 500, Errors5xxTotal: 3, ActiveConnections: 7, AvgDurationMs: 12.3, ReportingInstances: 2},
+	}
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(session)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "web-tier") || !strings.Contains(body, "500") {
+		t.Errorf("expected the metrics table to render the group's traffic summary, got: %s", body)
 	}
 }

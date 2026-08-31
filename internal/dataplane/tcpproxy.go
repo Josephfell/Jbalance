@@ -27,16 +27,20 @@ import (
 // connection — no per-request re-selection is possible at this layer,
 // since a TCP proxy has no concept of "request" within a connection.
 type TCPProxy struct {
+	group    string
 	backends *BackendList
+	metrics  *Metrics
 	// DialTimeout bounds how long connecting to the selected backend may
 	// take before the client connection is closed. Defaults to 5s if
 	// zero.
 	DialTimeout time.Duration
 }
 
-// NewTCPProxy creates an L4 proxy that selects backends from backends.
-func NewTCPProxy(backends *BackendList) *TCPProxy {
-	return &TCPProxy{backends: backends}
+// NewTCPProxy creates an L4 proxy that selects backends from backends,
+// labelling metrics with group. metrics may be nil, in which case no
+// metrics are recorded.
+func NewTCPProxy(group string, backends *BackendList, metrics *Metrics) *TCPProxy {
+	return &TCPProxy{group: group, backends: backends, metrics: metrics}
 }
 
 func (p *TCPProxy) dialTimeout() time.Duration {
@@ -83,7 +87,13 @@ func (p *TCPProxy) handleConn(ctx context.Context, client net.Conn) {
 	}
 	defer func() { _ = upstream.Close() }()
 
-	pipeBidirectional(client, upstream)
+	if p.metrics != nil {
+		p.metrics.ObserveTCPConnection(p.group)
+		p.metrics.SetTCPActiveConnections(p.group, 1)
+		defer p.metrics.SetTCPActiveConnections(p.group, -1)
+	}
+
+	pipeBidirectional(p.group, p.metrics, client, upstream)
 }
 
 // pipeBidirectional copies bytes in both directions between a and b until
@@ -93,19 +103,26 @@ func (p *TCPProxy) handleConn(ctx context.Context, client net.Conn) {
 // one direction finishes — some protocols rely on being able to keep
 // reading a response after they've finished sending their request, and a
 // full Close here would cut that off. The caller closes both connections
-// fully once pipeBidirectional returns.
-func pipeBidirectional(a, b net.Conn) {
+// fully once pipeBidirectional returns. metrics may be nil, in which case
+// bytes-transferred aren't recorded.
+func pipeBidirectional(group string, metrics *Metrics, a, b net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(b, a)
+		n, _ := io.Copy(b, a)
+		if metrics != nil {
+			metrics.ObserveTCPBytes(group, "in", n)
+		}
 		closeWrite(b)
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(a, b)
+		n, _ := io.Copy(a, b)
+		if metrics != nil {
+			metrics.ObserveTCPBytes(group, "out", n)
+		}
 		closeWrite(a)
 	}()
 

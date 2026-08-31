@@ -28,6 +28,16 @@ service ControlPlane {
   // different backend groups from a single listener, rather than being
   // pinned to a single group for its entire lifetime.
   rpc StreamRoutes(StreamRoutesRequest) returns (stream RouteTable);
+
+  // ReportMetrics is called periodically by a data plane instance to
+  // push a lightweight summary of its own traffic (requests/sec, active
+  // connections, error rate) for display on the admin web UI's live
+  // charts. This mirrors ReportHealth's push model rather than the
+  // control plane reaching out to scrape each data plane's own
+  // Prometheus /metrics endpoint directly — the control plane has no
+  // route back to a data plane instance (only the reverse), and pushing
+  // a small summary avoids needing one.
+  rpc ReportMetrics(MetricsReport) returns (MetricsReportAck);
 }
 
 message StreamBackendsRequest {
@@ -120,3 +130,26 @@ message RouteTable {
   // — lets the data plane detect and ignore stale/out-of-order updates.
   int64 version = 2;
 }
+
+message GroupMetrics {
+  string group = 1;
+  // Counts since this instance's process start (or since the last
+  // report — the control plane treats these as point-in-time gauges of
+  // "requests seen so far", deriving a rate itself rather than the data
+  // plane pre-computing one, since the report interval is configurable).
+  int64 requests_total = 2;
+  int64 errors_5xx_total = 3;
+  int64 active_connections = 4;
+  // Average request duration in milliseconds, over the reporting
+  // interval since the last report — not cumulative like the counts
+  // above, since an all-time average would smooth away exactly the
+  // recent-latency-spike signal this exists to surface.
+  double avg_duration_ms = 5;
+}
+
+message MetricsReport {
+  string instance_id = 1;
+  repeated GroupMetrics groups = 2;
+}
+
+message MetricsReportAck {}

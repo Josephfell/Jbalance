@@ -17,9 +17,10 @@ import (
 // weights) is pushed to it by the control plane; the proxy itself just
 // resolves, picks the next backend, and forwards.
 type Proxy struct {
-	routes *RouteTable
-	groups *GroupManager
-	rp     *httputil.ReverseProxy
+	routes  *RouteTable
+	groups  *GroupManager
+	rp      *httputil.ReverseProxy
+	metrics *Metrics
 }
 
 // contextKey avoids collisions with other packages' context values.
@@ -31,13 +32,22 @@ func contextWithBackendAddr(ctx context.Context, addr string) context.Context {
 	return context.WithValue(ctx, backendAddrKey, addr)
 }
 
+// statusCodeKey stores the eventual response status code in the request
+// context, set by rp.ModifyResponse (for a successful proxied response)
+// or the ErrorHandler (for a failed one) — read back by Handler after
+// ServeHTTP returns so a single metrics observation covers both outcomes
+// rather than needing separate recording paths.
+const statusCodeKey contextKey = iota + 1
+
 // NewProxy creates a reverse proxy that resolves each request's target
-// group via routes and selects a backend within that group via groups. A
-// single httputil.ReverseProxy is reused across all requests; the target
-// backend is selected per-request via the Rewrite hook rather than
-// constructing a new ReverseProxy per call.
-func NewProxy(routes *RouteTable, groups *GroupManager) *Proxy {
-	p := &Proxy{routes: routes, groups: groups}
+// group via routes and selects a backend within that group via groups.
+// metrics may be nil, in which case no request metrics are recorded (a
+// nil registry is used by tests that don't care about metrics). A single
+// httputil.ReverseProxy is reused across all requests; the target backend
+// is selected per-request via the Rewrite hook rather than constructing a
+// new ReverseProxy per call.
+func NewProxy(routes *RouteTable, groups *GroupManager, metrics *Metrics) *Proxy {
+	p := &Proxy{routes: routes, groups: groups, metrics: metrics}
 
 	p.rp = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -45,9 +55,18 @@ func NewProxy(routes *RouteTable, groups *GroupManager) *Proxy {
 			pr.SetURL(&url.URL{Scheme: "http", Host: addr})
 			pr.SetXForwarded()
 		},
+		ModifyResponse: func(resp *http.Response) error {
+			if ptr, ok := resp.Request.Context().Value(statusCodeKey).(*int); ok {
+				*ptr = resp.StatusCode
+			}
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			addr, _ := r.Context().Value(backendAddrKey).(string)
 			log.Printf("dataplane: proxy error forwarding to %s: %v", addr, err)
+			if ptr, ok := r.Context().Value(statusCodeKey).(*int); ok {
+				*ptr = http.StatusBadGateway
+			}
 			http.Error(w, "upstream request failed", http.StatusBadGateway)
 		},
 	}
@@ -69,6 +88,9 @@ func (p *Proxy) Handler() http.Handler {
 		addr, ok := selectBackend(w, r, backends)
 		if !ok {
 			http.Error(w, "no healthy backends available", http.StatusServiceUnavailable)
+			if p.metrics != nil {
+				p.metrics.ObserveHTTPRequest(group, http.StatusServiceUnavailable, 0)
+			}
 			return
 		}
 		// Either path through selectBackend has already incremented this
@@ -79,8 +101,20 @@ func (p *Proxy) Handler() http.Handler {
 		// rather than only ever growing.
 		defer backends.Release(addr)
 
+		start := time.Now()
+		if p.metrics != nil {
+			p.metrics.SetActiveConnections(group, 1)
+			defer p.metrics.SetActiveConnections(group, -1)
+		}
+
+		statusCode := http.StatusOK // default if neither ModifyResponse nor ErrorHandler overwrite it (shouldn't happen, but avoids an unset value)
 		ctx := contextWithBackendAddr(r.Context(), addr)
+		ctx = context.WithValue(ctx, statusCodeKey, &statusCode)
 		p.rp.ServeHTTP(w, r.WithContext(ctx))
+
+		if p.metrics != nil {
+			p.metrics.ObserveHTTPRequest(group, statusCode, time.Since(start))
+		}
 	})
 }
 

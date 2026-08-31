@@ -34,6 +34,26 @@ type healthEntry struct {
 	reportedAt time.Time
 }
 
+// metricsKey identifies one group's traffic summary as reported by one
+// specific data plane instance — kept per-reporter (like backendHealthKey)
+// since a single group can be served by multiple data plane instances,
+// each with its own independent traffic.
+type metricsKey struct {
+	instanceID string
+	group      string
+}
+
+// metricsEntry is one reported traffic summary with the time it was
+// received, so a stale report from a disconnected/dead data plane doesn't
+// linger forever in aggregated totals.
+type metricsEntry struct {
+	requestsTotal  int64
+	errors5xxTotal int64
+	activeConns    int64
+	avgDurationMs  float64
+	reportedAt     time.Time
+}
+
 // instanceKey identifies one currently-or-recently-connected data plane
 // instance. Keyed by instanceID alone (not also group) since an
 // instance ID is expected to be unique per data plane process — if two
@@ -74,8 +94,13 @@ type Server struct {
 	healthMu sync.RWMutex
 	health   map[backendHealthKey]healthEntry
 
+	metricsMu sync.RWMutex
+	metrics   map[metricsKey]metricsEntry
+
 	instancesMu sync.RWMutex
 	instances   map[instanceKey]*instanceState
+
+	history *metricsHistory
 
 	// routeSubsMu/routeSubs/lastRoutes mirror mu/subs/last above but for
 	// the global route table (StreamRoutes) rather than a per-group
@@ -114,6 +139,8 @@ func NewServer(provider pool.Provider, overrides *OverrideStore, algorithms *Alg
 		subs:       make(map[string]map[chan *pb.BackendSet]struct{}),
 		last:       make(map[string]*pb.BackendSet),
 		health:     make(map[backendHealthKey]healthEntry),
+		metrics:    make(map[metricsKey]metricsEntry),
+		history:    newMetricsHistory(),
 		instances:  make(map[instanceKey]*instanceState),
 		routeSubs:  make(map[chan *pb.RouteTable]struct{}),
 	}
@@ -440,6 +467,108 @@ func (s *Server) ReportHealth(_ context.Context, report *pb.HealthReport) (*pb.H
 	s.recordInstanceHealthReport(report.GetInstanceId(), len(report.GetBackends()), now)
 
 	return &pb.HealthReportAck{}, nil
+}
+
+// metricsReportMaxAge bounds how long a reported traffic summary is
+// trusted before being excluded from aggregation — same rationale as
+// healthReportMaxAge: a disconnected/dead data plane's last-known
+// numbers shouldn't linger forever in what the admin UI charts.
+const metricsReportMaxAge = 30 * time.Second
+
+// ReportMetrics implements pb.ControlPlaneServer. Data plane instances
+// call this periodically (independent of the StreamBackends stream) to
+// push a lightweight summary of their own traffic, for display on the
+// admin web UI's live charts.
+func (s *Server) ReportMetrics(_ context.Context, report *pb.MetricsReport) (*pb.MetricsReportAck, error) {
+	now := time.Now()
+
+	s.metricsMu.Lock()
+	for _, gm := range report.GetGroups() {
+		key := metricsKey{instanceID: report.GetInstanceId(), group: gm.GetGroup()}
+		s.metrics[key] = metricsEntry{
+			requestsTotal:  gm.GetRequestsTotal(),
+			errors5xxTotal: gm.GetErrors_5XxTotal(),
+			activeConns:    gm.GetActiveConnections(),
+			avgDurationMs:  gm.GetAvgDurationMs(),
+			reportedAt:     now,
+		}
+	}
+	s.metricsMu.Unlock()
+
+	s.history.record(s.MetricsSnapshot())
+
+	return &pb.MetricsReportAck{}, nil
+}
+
+// GroupMetricsSnapshot is an aggregated, display-ready traffic summary
+// for one group, combining every non-stale report from every data plane
+// instance currently or recently serving it.
+type GroupMetricsSnapshot struct {
+	Group string
+	// RequestsTotal/Errors5xxTotal are summed across every reporting
+	// instance — these are cumulative-since-instance-start counters, so
+	// summing them gives "total requests this group has ever served
+	// across its whole fleet", not a rate; the admin UI derives a rate by
+	// comparing successive snapshots itself.
+	RequestsTotal  int64
+	Errors5xxTotal int64
+	// ActiveConnections is also summed — "how many requests are in
+	// flight right now, across every instance serving this group".
+	ActiveConnections int64
+	// AvgDurationMs is averaged across reporting instances (not summed —
+	// summing an average would be meaningless), unweighted by each
+	// instance's request volume. A simple, good-enough approximation
+	// rather than a weighted mean, since this is a display value, not
+	// something else downstream depends on for correctness.
+	AvgDurationMs float64
+	// ReportingInstances is how many distinct data plane instances
+	// contributed a non-stale report — lets the admin UI show "no data
+	// yet" distinctly from "0 requests reported".
+	ReportingInstances int
+}
+
+// MetricsSnapshot returns an aggregated traffic summary per group, from
+// every non-stale ReportMetrics report currently held. Groups with no
+// report at all (or only stale ones) are simply omitted, rather than
+// appearing with all-zero values that would look like real (if
+// currently idle) traffic.
+func (s *Server) MetricsSnapshot() []GroupMetricsSnapshot {
+	s.metricsMu.RLock()
+	defer s.metricsMu.RUnlock()
+
+	now := time.Now()
+	byGroup := make(map[string]*GroupMetricsSnapshot)
+	for key, entry := range s.metrics {
+		if now.Sub(entry.reportedAt) > metricsReportMaxAge {
+			continue
+		}
+		g, ok := byGroup[key.group]
+		if !ok {
+			g = &GroupMetricsSnapshot{Group: key.group}
+			byGroup[key.group] = g
+		}
+		g.RequestsTotal += entry.requestsTotal
+		g.Errors5xxTotal += entry.errors5xxTotal
+		g.ActiveConnections += entry.activeConns
+		g.AvgDurationMs += entry.avgDurationMs
+		g.ReportingInstances++
+	}
+
+	out := make([]GroupMetricsSnapshot, 0, len(byGroup))
+	for _, g := range byGroup {
+		if g.ReportingInstances > 0 {
+			g.AvgDurationMs /= float64(g.ReportingInstances)
+		}
+		out = append(out, *g)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Group < out[j].Group })
+	return out
+}
+
+// MetricsHistory returns up to the last n aggregated fleet-wide traffic
+// samples, oldest first, for the admin web UI's overview chart.
+func (s *Server) MetricsHistory(n int) []HistoryPoint {
+	return s.history.Recent(n)
 }
 
 // markInstanceConnected records that instanceID has an active

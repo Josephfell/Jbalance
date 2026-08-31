@@ -354,6 +354,57 @@ modes read from the same `BackendList`.
 `tcp` mode) terminate TLS at the listener in either mode; leave them
 unset to accept plaintext TCP.
 
+## Monitoring and metrics
+
+Every data plane instance exposes traffic metrics two ways at once, kept
+in sync by construction (both read from the same underlying counters):
+
+**Prometheus.** Each instance serves `GET /metrics` on its own listener
+(`-metrics-addr`, default `:9100`) — deliberately separate from the
+traffic port, so a Prometheus scrape can never compete with (or be
+mistaken for) an actual proxied request or TCP connection. Metrics
+exposed, all labelled by `group`:
+
+- `jbalance_http_requests_total{group,status}` — counter, `status` is a
+  response class (`2xx`/`4xx`/`5xx`/etc), L7 mode only
+- `jbalance_http_request_duration_seconds{group}` — histogram, L7 mode only
+- `jbalance_active_connections{group}` — gauge, in-flight requests, L7 mode only
+- `jbalance_tcp_connections_total{group}` — counter, L4 mode only
+- `jbalance_tcp_bytes_total{group,direction}` — counter, `direction` is `in`/`out`, L4 mode only
+- `jbalance_tcp_active_connections{group}` — gauge, L4 mode only
+- `jbalance_backends_healthy{group}` / `jbalance_backends_total{group}` —
+  gauges, read live from the current backend list on every scrape (not
+  cached), present in both modes
+
+Point an existing Prometheus/Grafana setup at `<instance>:9100/metrics`
+on every data plane instance for full histograms, long-term retention,
+alerting rules, and whatever dashboards you'd build for any other
+service — this is the integration path for real production monitoring.
+Set `-metrics-disable` (or `LB_METRICS_DISABLE=true`) to turn the
+endpoint off entirely.
+
+**Built into the admin console.** The Dashboard's **Traffic** section
+works without any of the above — no Prometheus server required. Each
+data plane instance also pushes a small traffic summary straight to the
+control plane (`-metrics-report-interval`, default 10s), the same push
+model `ReportHealth` already uses for backend health, since the control
+plane has no route back to reach a data plane instance directly to scrape
+it. This gives you:
+- A live chart (requests/sec, active connections, 5xx errors/sec, average
+  latency) aggregated across every group, polling `/metrics.json` every
+  3 seconds — switch what it plots with the tabs above the chart.
+  Bounded to roughly the last 10 minutes of history, kept in memory only
+  (consistent with this project's no-external-database pattern
+  everywhere else).
+- A **Traffic by group** table: cumulative requests/errors, current
+  active connections, and average latency, summed/averaged across every
+  data plane instance currently (or recently) reporting for that group.
+
+A group with no data plane instance reporting on it yet simply doesn't
+appear in either view, rather than showing misleading all-zero values —
+the same "no data yet" distinction the health-status display already
+makes.
+
 ## Azure VMSS provider
 
 A real backend pool provider is included: `pool.AzureVMSSProvider` reports

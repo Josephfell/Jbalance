@@ -214,6 +214,21 @@ const templatesSource = `
   .routes-actions { display: flex; justify-content: space-between; align-items: center; padding: 11px 14px; border-top: 1px solid var(--border); }
   .col-host { width: 15%; } .col-path { width: 15%; } .col-methods { width: 15%; }
   .col-group { width: 15%; } .col-name { width: 20%; } .col-del { width: 60px; text-align: center; }
+
+  /* — traffic chart — */
+  .chart-tabs { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
+  .chart-tab {
+    font-size: 11.5px; padding: 5px 10px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer;
+  }
+  .chart-tab:hover { border-color: var(--text-muted); }
+  .chart-tab--active { border-color: var(--accent); color: var(--accent); background: var(--accent-weak); }
+  .chart-svg { width: 100%; height: 220px; display: block; overflow: visible; }
+  .chart-gridline { stroke: var(--border-soft); stroke-width: 1; }
+  .chart-gridline--base { stroke: var(--border); }
+  .chart-area { fill: color-mix(in srgb, var(--accent) 16%, transparent); stroke: none; }
+  .chart-line { fill: none; stroke: var(--accent); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+  .chart-empty { font-size: 12.5px; color: var(--text-faint); text-align: center; padding: 12px 0 2px; }
   .login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
   .login-title { font-size: 19px; margin-bottom: 3px; }
   .login-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 20px; }
@@ -320,6 +335,53 @@ const templatesSource = `
       </header>
       <div class="content">
         <p class="refresh-note" id="refresh-note">Auto-refreshing every 5s · last updated just now</p>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>Traffic</h2>
+            <span class="meta" id="chart-meta">aggregated across every group this control plane manages · last 10 min</span>
+          </div>
+          <div class="card-pad">
+            <div class="chart-tabs">
+              <button type="button" class="chart-tab chart-tab--active" data-metric="req">Requests/s</button>
+              <button type="button" class="chart-tab" data-metric="active">Active connections</button>
+              <button type="button" class="chart-tab" data-metric="err">5xx errors/s</button>
+              <button type="button" class="chart-tab" data-metric="avgMs">Avg latency (ms)</button>
+            </div>
+            <svg id="traffic-chart" viewBox="0 0 1000 220" preserveAspectRatio="none" class="chart-svg">
+              <line x1="0" y1="10" x2="1000" y2="10" class="chart-gridline"></line>
+              <line x1="0" y1="70" x2="1000" y2="70" class="chart-gridline"></line>
+              <line x1="0" y1="130" x2="1000" y2="130" class="chart-gridline"></line>
+              <line x1="0" y1="190" x2="1000" y2="190" class="chart-gridline chart-gridline--base"></line>
+              <path id="chart-area" class="chart-area"></path>
+              <path id="chart-line" class="chart-line"></path>
+            </svg>
+            <div class="chart-empty" id="chart-empty">No traffic reported yet — this fills in once a data plane instance proxies at least one request and reports it back (every 10s by default).</div>
+          </div>
+        </section>
+
+        {{if .Metrics}}
+        <section class="card">
+          <div class="card-head">
+            <h2>Traffic by group</h2>
+            <span class="meta">cumulative since each instance started · summed across every instance serving that group</span>
+          </div>
+          <table class="table">
+            <tr><th>Group</th><th>Requests</th><th>5xx errors</th><th>Active connections</th><th>Avg latency</th><th>Reporting instances</th></tr>
+            {{range .Metrics}}
+            <tr>
+              <td class="mono">{{.Group}}</td>
+              <td class="mono">{{.RequestsTotal}}</td>
+              <td class="mono">{{.Errors5xxTotal}}</td>
+              <td class="mono">{{.ActiveConnections}}</td>
+              <td class="mono">{{printf "%.1f" .AvgDurationMs}}ms</td>
+              <td class="muted">{{.ReportingInstances}}</td>
+            </tr>
+            {{end}}
+          </table>
+        </section>
+        {{end}}
+
         {{if not .Groups}}
           <div class="empty">No backend groups reported yet. The control plane's reconciliation loop runs periodically — check back shortly, or check the container logs if this persists.</div>
         {{else}}
@@ -437,6 +499,75 @@ const templatesSource = `
           .catch(function () { /* network hiccup — try again next tick */ });
       }
       setInterval(refresh, 5000);
+    })();
+    // Traffic chart: polls /metrics.json on its own faster interval than
+    // the whole-dashboard refresh above (traffic changes meaningfully
+    // faster than backend health/weight typically does), and redraws a
+    // plain SVG line+area chart. Elements are re-queried by ID on every
+    // draw (rather than cached) since the dashboard auto-refresh above
+    // replaces .content's innerHTML wholesale, which would otherwise
+    // leave this code holding references to detached nodes. Tab
+    // selection uses event delegation on document for the same reason —
+    // a direct listener on the original button would stop firing once
+    // that button is replaced by a refresh.
+    (function () {
+      var currentMetric = 'req';
+      var latestPoints = [];
+
+      function draw() {
+        var svg = document.getElementById('traffic-chart');
+        var areaEl = document.getElementById('chart-area');
+        var lineEl = document.getElementById('chart-line');
+        var emptyEl = document.getElementById('chart-empty');
+        if (!svg || !areaEl || !lineEl) return;
+
+        var vals = latestPoints.map(function (p) { return p[currentMetric] || 0; });
+        if (vals.length < 2) {
+          areaEl.setAttribute('d', '');
+          lineEl.setAttribute('d', '');
+          if (emptyEl) emptyEl.style.display = 'block';
+          svg.style.display = 'none';
+          return;
+        }
+        if (emptyEl) emptyEl.style.display = 'none';
+        svg.style.display = 'block';
+
+        var w = 1000, h = 220, pad = 12;
+        var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
+        var span = (max - min) || 1;
+        var linePts = vals.map(function (v, i) {
+          var x = (i / (vals.length - 1)) * w;
+          var y = h - pad - ((v - min) / span) * (h - pad * 2);
+          return (i ? 'L' : 'M') + x.toFixed(1) + ',' + y.toFixed(1);
+        }).join(' ');
+        lineEl.setAttribute('d', linePts);
+        areaEl.setAttribute('d', linePts + ' L' + w + ',' + h + ' L0,' + h + ' Z');
+      }
+
+      function refreshMetrics() {
+        fetch('/metrics.json')
+          .then(function (res) { return res.ok ? res.json() : []; })
+          .then(function (points) {
+            latestPoints = points || [];
+            draw();
+            var meta = document.getElementById('chart-meta');
+            if (meta) meta.textContent = 'aggregated across every group this control plane manages · last 10 min · updated ' + new Date().toLocaleTimeString();
+          })
+          .catch(function () { /* network hiccup — try again next tick */ });
+      }
+
+      document.addEventListener('click', function (e) {
+        var btn = e.target.closest && e.target.closest('.chart-tab');
+        if (!btn) return;
+        currentMetric = btn.getAttribute('data-metric');
+        document.querySelectorAll('.chart-tab').forEach(function (b) {
+          b.classList.toggle('chart-tab--active', b === btn);
+        });
+        draw();
+      });
+
+      refreshMetrics();
+      setInterval(refreshMetrics, 3000);
     })();
   </script>
 </body>

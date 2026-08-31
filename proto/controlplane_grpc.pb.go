@@ -22,6 +22,7 @@ const (
 	ControlPlane_StreamBackends_FullMethodName = "/controlplane.ControlPlane/StreamBackends"
 	ControlPlane_ReportHealth_FullMethodName   = "/controlplane.ControlPlane/ReportHealth"
 	ControlPlane_StreamRoutes_FullMethodName   = "/controlplane.ControlPlane/StreamRoutes"
+	ControlPlane_ReportMetrics_FullMethodName  = "/controlplane.ControlPlane/ReportMetrics"
 )
 
 // ControlPlaneClient is the client API for ControlPlane service.
@@ -50,6 +51,15 @@ type ControlPlaneClient interface {
 	// different backend groups from a single listener, rather than being
 	// pinned to a single group for its entire lifetime.
 	StreamRoutes(ctx context.Context, in *StreamRoutesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RouteTable], error)
+	// ReportMetrics is called periodically by a data plane instance to
+	// push a lightweight summary of its own traffic (requests/sec, active
+	// connections, error rate) for display on the admin web UI's live
+	// charts. This mirrors ReportHealth's push model rather than the
+	// control plane reaching out to scrape each data plane's own
+	// Prometheus /metrics endpoint directly — the control plane has no
+	// route back to a data plane instance (only the reverse), and pushing
+	// a small summary avoids needing one.
+	ReportMetrics(ctx context.Context, in *MetricsReport, opts ...grpc.CallOption) (*MetricsReportAck, error)
 }
 
 type controlPlaneClient struct {
@@ -108,6 +118,16 @@ func (c *controlPlaneClient) StreamRoutes(ctx context.Context, in *StreamRoutesR
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ControlPlane_StreamRoutesClient = grpc.ServerStreamingClient[RouteTable]
 
+func (c *controlPlaneClient) ReportMetrics(ctx context.Context, in *MetricsReport, opts ...grpc.CallOption) (*MetricsReportAck, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MetricsReportAck)
+	err := c.cc.Invoke(ctx, ControlPlane_ReportMetrics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlPlaneServer is the server API for ControlPlane service.
 // All implementations must embed UnimplementedControlPlaneServer
 // for forward compatibility.
@@ -134,6 +154,15 @@ type ControlPlaneServer interface {
 	// different backend groups from a single listener, rather than being
 	// pinned to a single group for its entire lifetime.
 	StreamRoutes(*StreamRoutesRequest, grpc.ServerStreamingServer[RouteTable]) error
+	// ReportMetrics is called periodically by a data plane instance to
+	// push a lightweight summary of its own traffic (requests/sec, active
+	// connections, error rate) for display on the admin web UI's live
+	// charts. This mirrors ReportHealth's push model rather than the
+	// control plane reaching out to scrape each data plane's own
+	// Prometheus /metrics endpoint directly — the control plane has no
+	// route back to a data plane instance (only the reverse), and pushing
+	// a small summary avoids needing one.
+	ReportMetrics(context.Context, *MetricsReport) (*MetricsReportAck, error)
 	mustEmbedUnimplementedControlPlaneServer()
 }
 
@@ -152,6 +181,9 @@ func (UnimplementedControlPlaneServer) ReportHealth(context.Context, *HealthRepo
 }
 func (UnimplementedControlPlaneServer) StreamRoutes(*StreamRoutesRequest, grpc.ServerStreamingServer[RouteTable]) error {
 	return status.Error(codes.Unimplemented, "method StreamRoutes not implemented")
+}
+func (UnimplementedControlPlaneServer) ReportMetrics(context.Context, *MetricsReport) (*MetricsReportAck, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportMetrics not implemented")
 }
 func (UnimplementedControlPlaneServer) mustEmbedUnimplementedControlPlaneServer() {}
 func (UnimplementedControlPlaneServer) testEmbeddedByValue()                      {}
@@ -214,6 +246,24 @@ func _ControlPlane_StreamRoutes_Handler(srv interface{}, stream grpc.ServerStrea
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ControlPlane_StreamRoutesServer = grpc.ServerStreamingServer[RouteTable]
 
+func _ControlPlane_ReportMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MetricsReport)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).ReportMetrics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_ReportMetrics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).ReportMetrics(ctx, req.(*MetricsReport))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlPlane_ServiceDesc is the grpc.ServiceDesc for ControlPlane service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -224,6 +274,10 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReportHealth",
 			Handler:    _ControlPlane_ReportHealth_Handler,
+		},
+		{
+			MethodName: "ReportMetrics",
+			Handler:    _ControlPlane_ReportMetrics_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -29,6 +29,8 @@ type StateProvider interface {
 	Routes() []controlplane.Route
 	SetRoutes(routes []controlplane.Route) error
 	SetSticky(ctx context.Context, group string, cfg controlplane.StickyConfig) error
+	MetricsSnapshot() []controlplane.GroupMetricsSnapshot
+	MetricsHistory(n int) []controlplane.HistoryPoint
 }
 
 // Server serves the admin web management interface: a password-protected
@@ -111,6 +113,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fleet", s.requireAuth(s.handleFleetPage))
 	mux.HandleFunc("GET /routes", s.requireAuth(s.handleRoutesPage))
 	mux.HandleFunc("POST /routes", s.requireAuth(s.handleRoutesSubmit))
+	mux.HandleFunc("GET /metrics.json", s.requireAuth(s.handleMetricsJSON))
 	return mux
 }
 
@@ -179,6 +182,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"Groups":          s.state.Snapshot(r.Context()),
 		"CSRFToken":       s.csrfToken(w, r),
 		"ValidAlgorithms": controlplane.ValidAlgorithms,
+		"Metrics":         s.state.MetricsSnapshot(),
 	})
 }
 
@@ -482,6 +486,43 @@ func splitMethods(s string) []string {
 		return nil
 	}
 	return out
+}
+
+// metricsChartPoint is the small JSON shape the dashboard's chart JS
+// consumes — deliberately minimal (just what's plotted) rather than
+// serialising controlplane.HistoryPoint directly, so the wire format
+// isn't coupled to that struct's field set.
+type metricsChartPoint struct {
+	T      int64   `json:"t"` // unix millis, for JS Date construction
+	Req    int64   `json:"req"`
+	Err    int64   `json:"err"`
+	Active int64   `json:"active"`
+	AvgMs  float64 `json:"avgMs"`
+}
+
+// handleMetricsJSON serves recent aggregated fleet-wide traffic history
+// as JSON, polled by the dashboard's chart JS. A dedicated JSON endpoint
+// rather than embedding the data in the server-rendered dashboard HTML —
+// the chart re-fetches this on its own faster interval than the whole
+// dashboard's auto-refresh, since traffic changes meaningfully faster
+// than backend health/weight typically does.
+func (s *Server) handleMetricsJSON(w http.ResponseWriter, r *http.Request) {
+	history := s.state.MetricsHistory(120) // 120 points at 5s buckets = last 10 minutes
+	points := make([]metricsChartPoint, len(history))
+	for i, p := range history {
+		points[i] = metricsChartPoint{
+			T:      p.Time.UnixMilli(),
+			Req:    p.RequestsDelta,
+			Err:    p.Errors5xxDelta,
+			Active: p.ActiveConns,
+			AvgMs:  p.AvgDurationMs,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(points); err != nil {
+		http.Error(w, "failed to encode metrics", http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) handleFleetPage(w http.ResponseWriter, r *http.Request) {

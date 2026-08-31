@@ -34,7 +34,7 @@ func TestProxy_RoutesToDefaultGroupWithNoRoutes(t *testing.T) {
 	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
 	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: addr, Weight: 1}}})
 
-	proxy := NewProxy(routes, groups)
+	proxy := NewProxy(routes, groups, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/anything", nil)
 	proxy.Handler().ServeHTTP(rec, req)
@@ -65,7 +65,7 @@ func TestProxy_RoutesByPathPrefix(t *testing.T) {
 	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: webAddr, Weight: 1}}})
 	groups.Ensure("api-tier").Update(&pb.BackendSet{Group: "api-tier", Version: 1, Backends: []*pb.Backend{{Address: apiAddr, Weight: 1}}})
 
-	proxy := NewProxy(routes, groups)
+	proxy := NewProxy(routes, groups, nil)
 	handler := proxy.Handler()
 
 	rec1 := httptest.NewRecorder()
@@ -99,7 +99,7 @@ func TestProxy_RoutesByHost(t *testing.T) {
 	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: webAddr, Weight: 1}}})
 	groups.Ensure("static-edge").Update(&pb.BackendSet{Group: "static-edge", Version: 1, Backends: []*pb.Backend{{Address: staticAddr, Weight: 1}}})
 
-	proxy := NewProxy(routes, groups)
+	proxy := NewProxy(routes, groups, nil)
 	handler := proxy.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/logo.png", nil)
@@ -121,7 +121,7 @@ func TestProxy_ReturnsServiceUnavailableWhenResolvedGroupHasNoBackends(t *testin
 	// Deliberately never call Update — the group exists but has no backends.
 	groups.Ensure("web-tier")
 
-	proxy := NewProxy(routes, groups)
+	proxy := NewProxy(routes, groups, nil)
 	rec := httptest.NewRecorder()
 	proxy.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
@@ -147,7 +147,7 @@ func TestProxy_LazilyEnsuresGroupReferencedOnlyByARoute(t *testing.T) {
 	// proxy's own call to groups.Ensure inside Handler must create it on
 	// demand. Populate its backends only after constructing the proxy, to
 	// prove the lazy path (not a pre-existing group) is what's exercised.
-	proxy := NewProxy(routes, groups)
+	proxy := NewProxy(routes, groups, nil)
 
 	groups.Ensure("api-tier").Update(&pb.BackendSet{Group: "api-tier", Version: 1, Backends: []*pb.Backend{{Address: apiAddr, Weight: 1}}})
 
@@ -177,7 +177,7 @@ func TestProxy_StickySessions_PinsToSameBackendAcrossRequests(t *testing.T) {
 		Backends: []*pb.Backend{{Address: addrA, Weight: 1}, {Address: addrB, Weight: 1}},
 	})
 
-	proxy := NewProxy(routes, groups)
+	proxy := NewProxy(routes, groups, nil)
 	handler := proxy.Handler()
 
 	// First request: no cookie yet, gets pinned to whichever backend Next()
@@ -228,7 +228,7 @@ func TestProxy_StickySessions_FallsBackWhenPinnedBackendUnhealthy(t *testing.T) 
 		Backends: []*pb.Backend{{Address: addrA, Weight: 1}, {Address: addrB, Weight: 1}},
 	})
 
-	proxy := NewProxy(routes, groups)
+	proxy := NewProxy(routes, groups, nil)
 	handler := proxy.Handler()
 
 	// Pin to addrA explicitly via a forged cookie, then mark it unhealthy.
@@ -274,7 +274,7 @@ func TestProxy_StickySessions_ForgedCookieCannotEscapeGroup(t *testing.T) {
 		Backends: []*pb.Backend{{Address: addrA, Weight: 1}},
 	})
 
-	proxy := NewProxy(routes, groups)
+	proxy := NewProxy(routes, groups, nil)
 	handler := proxy.Handler()
 
 	// A cookie naming an address that was never part of this group at all
@@ -306,7 +306,7 @@ func TestProxy_NoStickyCookieSetWhenDisabled(t *testing.T) {
 		Backends: []*pb.Backend{{Address: addr, Weight: 1}},
 	})
 
-	proxy := NewProxy(routes, groups)
+	proxy := NewProxy(routes, groups, nil)
 	rec := httptest.NewRecorder()
 	proxy.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 

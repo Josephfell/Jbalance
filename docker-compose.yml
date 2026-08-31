@@ -21,6 +21,7 @@ services:
       dockerfile: cmd/dataplane/Dockerfile
     ports:
       - "${LB_HTTP_PORT:-8080}:8080"
+      - "${LB_METRICS_PORT:-9100}:9100"
     env_file:
       - .env
     environment:
