@@ -60,6 +60,14 @@ func main() {
 
 	healthReportInterval := flag.Duration("health-report-interval", envflag.Duration("LB_HEALTH_REPORT_INTERVAL", 10*time.Second), "how often to report backend health status back to the control plane, for display in the admin web UI [env: LB_HEALTH_REPORT_INTERVAL]")
 
+	// Proxy timeout / retry / draining settings (both modes where noted).
+	proxyConnectTimeout := flag.Duration("proxy-connect-timeout", envflag.Duration("LB_PROXY_CONNECT_TIMEOUT", 5*time.Second), "(http mode) timeout for establishing a connection to a backend [env: LB_PROXY_CONNECT_TIMEOUT]")
+	proxyResponseTimeout := flag.Duration("proxy-response-timeout", envflag.Duration("LB_PROXY_RESPONSE_TIMEOUT", 30*time.Second), "(http mode) timeout waiting for a backend's response headers; 0 disables the limit [env: LB_PROXY_RESPONSE_TIMEOUT]")
+	proxyMaxRetries := flag.Int("proxy-max-retries", envflag.Int("LB_PROXY_MAX_RETRIES", 1), "(http mode) additional backends to try after a connection-level failure, for bodyless idempotent requests only [env: LB_PROXY_MAX_RETRIES]")
+	proxyRetryBackoff := flag.Duration("proxy-retry-backoff", envflag.Duration("LB_PROXY_RETRY_BACKOFF", 50*time.Millisecond), "(http mode) base delay between retry attempts (linear backoff) [env: LB_PROXY_RETRY_BACKOFF]")
+	tcpDialTimeout := flag.Duration("tcp-dial-timeout", envflag.Duration("LB_TCP_DIAL_TIMEOUT", 5*time.Second), "(tcp mode) timeout for connecting to the selected backend [env: LB_TCP_DIAL_TIMEOUT]")
+	shutdownGrace := flag.Duration("shutdown-grace", envflag.Duration("LB_SHUTDOWN_GRACE", 5*time.Second), "how long to wait for in-flight requests/connections to drain on shutdown before forcing close [env: LB_SHUTDOWN_GRACE]")
+
 	metricsAddr := flag.String("metrics-addr", envflag.String("LB_METRICS_ADDR", ":9100"), "address to serve Prometheus metrics on (/metrics), separate from the traffic listener so metrics scraping never competes with proxied paths/connections [env: LB_METRICS_ADDR]")
 	metricsDisable := flag.Bool("metrics-disable", envflag.Bool("LB_METRICS_DISABLE", false), "disable the Prometheus /metrics endpoint entirely [env: LB_METRICS_DISABLE]")
 	metricsReportInterval := flag.Duration("metrics-report-interval", envflag.Duration("LB_METRICS_REPORT_INTERVAL", 10*time.Second), "how often to push a traffic summary to the control plane, for display in the admin web UI's live charts [env: LB_METRICS_REPORT_INTERVAL]")
@@ -128,7 +136,7 @@ func main() {
 	}
 
 	if *protocol == "tcp" {
-		runTCP(ctx, id, *group, *listenAddr, *controlPlaneAddr, defaultBackends, metrics, *httpTLSCert, *httpTLSKey)
+		runTCP(ctx, id, *group, *listenAddr, *controlPlaneAddr, defaultBackends, metrics, *httpTLSCert, *httpTLSKey, *tcpDialTimeout, *shutdownGrace)
 		return
 	}
 
@@ -136,7 +144,12 @@ func main() {
 	routeSub := dataplane.NewRouteSubscriber(*controlPlaneAddr, id, routes, cpTLSConfig)
 	go routeSub.Run(ctx)
 
-	proxy := dataplane.NewProxy(routes, groups, metrics)
+	proxy := dataplane.NewProxy(routes, groups, metrics, dataplane.ProxyConfig{
+		ConnectTimeout:  *proxyConnectTimeout,
+		ResponseTimeout: *proxyResponseTimeout,
+		MaxRetries:      *proxyMaxRetries,
+		RetryBackoff:    *proxyRetryBackoff,
+	})
 
 	mux := http.NewServeMux()
 	mux.Handle("/", proxy.Handler())
@@ -167,8 +180,8 @@ func main() {
 
 	go func() {
 		<-ctx.Done()
-		log.Println("dataplane: shutting down HTTP server...")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		log.Printf("dataplane: shutting down HTTP server (draining in-flight requests, up to %s)...", *shutdownGrace)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), *shutdownGrace)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
@@ -193,7 +206,7 @@ func main() {
 // bytes it forwards) and no debug/healthz HTTP endpoints — group is the
 // only backend group this listener will ever proxy to, for its entire
 // lifetime, exactly like an L7 data plane instance before routing existed.
-func runTCP(ctx context.Context, id, group, listenAddr, controlPlaneAddr string, backends *dataplane.BackendList, metrics *dataplane.Metrics, tlsCert, tlsKey string) {
+func runTCP(ctx context.Context, id, group, listenAddr, controlPlaneAddr string, backends *dataplane.BackendList, metrics *dataplane.Metrics, tlsCert, tlsKey string, dialTimeout, shutdownGrace time.Duration) {
 	var ln net.Listener
 	var err error
 	if tlsCert != "" {
@@ -211,15 +224,22 @@ func runTCP(ctx context.Context, id, group, listenAddr, controlPlaneAddr string,
 		log.Fatalf("dataplane: failed to listen on %s: %v", listenAddr, err)
 	}
 
+	proxy := dataplane.NewTCPProxy(group, backends, metrics)
+	proxy.DialTimeout = dialTimeout
+
 	go func() {
 		<-ctx.Done()
-		log.Println("dataplane: shutting down TCP listener...")
+		log.Printf("dataplane: shutting down TCP listener (draining in-flight connections, up to %s)...", shutdownGrace)
+		// Stop accepting new connections first, then let existing ones
+		// drain up to the grace period.
 		_ = ln.Close()
+		if !proxy.Drain(shutdownGrace) {
+			log.Println("dataplane: TCP drain grace period elapsed with connections still in flight")
+		}
 	}()
 
 	log.Printf("dataplane: instance %q serving group %q (tcp) on %s, control plane at %s", id, group, listenAddr, controlPlaneAddr)
 
-	proxy := dataplane.NewTCPProxy(group, backends, metrics)
 	if err := proxy.Serve(ctx, ln); err != nil {
 		log.Fatalf("dataplane: TCP proxy error: %v", err)
 	}

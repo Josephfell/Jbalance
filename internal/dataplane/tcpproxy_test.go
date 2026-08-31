@@ -191,3 +191,49 @@ func TestTCPProxy_DialTimeoutDefault(t *testing.T) {
 		t.Errorf("expected configured dial timeout to take effect, got %v", p.dialTimeout())
 	}
 }
+
+func TestTCPProxy_DrainWaitsForInflight(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	backendAddr, cleanup := newEchoBackend(t, "echo")
+	defer cleanup()
+
+	backends := NewBackendList()
+	backends.Update(&pb.BackendSet{Group: "tcp-tier", Version: 1, Backends: []*pb.Backend{{Address: backendAddr, Weight: 1}}})
+
+	proxy := NewTCPProxy("tcp-tier", backends, nil)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start proxy listener: %v", err)
+	}
+	go func() { _ = proxy.Serve(ctx, ln) }()
+
+	// Open a connection and keep it in flight.
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("failed to dial proxy: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("hi\n")); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 64)
+	if _, err := conn.Read(buf); err != nil {
+		t.Fatalf("expected to read echoed bytes before drain: %v", err)
+	}
+
+	// Stop accepting; Drain should report NOT-fully-drained while the
+	// connection is still open, then drained once it closes.
+	_ = ln.Close()
+	if proxy.Drain(200 * time.Millisecond) {
+		t.Error("expected Drain to time out while a connection is still in flight")
+	}
+
+	_ = conn.Close()
+	if !proxy.Drain(2 * time.Second) {
+		t.Error("expected Drain to complete once the in-flight connection closed")
+	}
+}

@@ -34,6 +34,10 @@ type TCPProxy struct {
 	// take before the client connection is closed. Defaults to 5s if
 	// zero.
 	DialTimeout time.Duration
+
+	// wg tracks in-flight proxied connections so Drain can wait for them
+	// to finish on shutdown.
+	wg sync.WaitGroup
 }
 
 // NewTCPProxy creates an L4 proxy that selects backends from backends,
@@ -68,7 +72,43 @@ func (p *TCPProxy) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
+// Drain waits for all in-flight proxied connections to finish, up to
+// grace. It returns once every connection has completed or the grace
+// period elapses (whichever comes first) — call it after closing the
+// listener (which stops new Accepts) so that existing connections are
+// allowed to complete rather than being cut off mid-transfer. Returns
+// true if all connections drained within the grace period, false if the
+// deadline was hit with connections still in flight. A non-positive grace
+// returns immediately.
+func (p *TCPProxy) Drain(grace time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+
+	if grace <= 0 {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 func (p *TCPProxy) handleConn(ctx context.Context, client net.Conn) {
+	p.wg.Add(1)
+	defer p.wg.Done()
 	defer func() { _ = client.Close() }()
 
 	addr, ok := p.backends.Next()
