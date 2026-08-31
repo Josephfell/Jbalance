@@ -17,6 +17,14 @@ type HealthCheckConfig struct {
 	Timeout          time.Duration
 	FailureThreshold int
 	SuccessThreshold int
+
+	// HTTP-mode probe settings. Mode empty/"tcp" keeps the historical
+	// TCP-connect probe; "http" issues an HTTP GET and checks the status.
+	Mode             HealthCheckMode
+	HTTPPath         string
+	HTTPExpectStatus int
+	HTTPScheme       string
+	HTTPHost         string
 }
 
 // GroupManager owns one BackendList (plus its Subscriber, HealthChecker,
@@ -96,6 +104,11 @@ func (m *GroupManager) Ensure(group string) *BackendList {
 	checker.Timeout = m.healthCfg.Timeout
 	checker.FailureThreshold = m.healthCfg.FailureThreshold
 	checker.SuccessThreshold = m.healthCfg.SuccessThreshold
+	checker.Mode = m.healthCfg.Mode
+	checker.HTTPPath = m.healthCfg.HTTPPath
+	checker.HTTPExpectStatus = m.healthCfg.HTTPExpectStatus
+	checker.HTTPScheme = m.healthCfg.HTTPScheme
+	checker.HTTPHost = m.healthCfg.HTTPHost
 	go checker.Run(m.baseCtx)
 
 	reporter := NewHealthReporter(m.controlPlaneAddr, group, m.instanceID, bl, m.tlsConfig, m.healthReportInterval)

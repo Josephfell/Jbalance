@@ -50,6 +50,12 @@ func main() {
 	unhealthyThreshold := flag.Int("unhealthy-threshold", envflag.Int("LB_UNHEALTHY_THRESHOLD", 3), "consecutive failed probes before a backend is taken out of rotation [env: LB_UNHEALTHY_THRESHOLD]")
 	healthyThreshold := flag.Int("healthy-threshold", envflag.Int("LB_HEALTHY_THRESHOLD", 2), "consecutive successful probes before a backend is returned to rotation [env: LB_HEALTHY_THRESHOLD]")
 
+	healthCheckMode := flag.String("health-check-mode", envflag.String("LB_HEALTH_CHECK_MODE", "tcp"), "backend health probe type: 'tcp' (plain connect) or 'http' (GET a path, check the status class — catches a backend that accepts connections but serves errors) [env: LB_HEALTH_CHECK_MODE]")
+	healthCheckPath := flag.String("health-check-path", envflag.String("LB_HEALTH_CHECK_PATH", "/"), "(http mode) path to GET when probing a backend [env: LB_HEALTH_CHECK_PATH]")
+	healthCheckExpectStatus := flag.Int("health-check-expect-status", envflag.Int("LB_HEALTH_CHECK_EXPECT_STATUS", 0), "(http mode) exact status code a probe must return to count as healthy; 0 means any 2xx [env: LB_HEALTH_CHECK_EXPECT_STATUS]")
+	healthCheckScheme := flag.String("health-check-scheme", envflag.String("LB_HEALTH_CHECK_SCHEME", "http"), "(http mode) scheme for the probe request: 'http' or 'https' [env: LB_HEALTH_CHECK_SCHEME]")
+	healthCheckHost := flag.String("health-check-host", envflag.String("LB_HEALTH_CHECK_HOST", ""), "(http mode) Host header to send with the probe; defaults to the backend address [env: LB_HEALTH_CHECK_HOST]")
+
 	cpTLSEnable := flag.Bool("control-plane-tls", envflag.Bool("LB_CONTROL_PLANE_TLS", false), "connect to the control plane over TLS [env: LB_CONTROL_PLANE_TLS]")
 	cpTLSCACert := flag.String("control-plane-tls-ca", envflag.String("LB_CONTROL_PLANE_TLS_CA", ""), "CA cert to verify the control plane's TLS certificate against; if unset, the system root CA pool is used [env: LB_CONTROL_PLANE_TLS_CA]")
 	cpTLSClientCert := flag.String("control-plane-tls-client-cert", envflag.String("LB_CONTROL_PLANE_TLS_CLIENT_CERT", ""), "client cert to present to the control plane (mutual TLS); requires -control-plane-tls-client-key [env: LB_CONTROL_PLANE_TLS_CLIENT_CERT]")
@@ -92,6 +98,10 @@ func main() {
 		log.Fatalf("dataplane: unknown -protocol %q (must be 'http' or 'tcp')", *protocol)
 	}
 
+	if *healthCheckMode != "tcp" && *healthCheckMode != "http" {
+		log.Fatalf("dataplane: unknown -health-check-mode %q (must be 'tcp' or 'http')", *healthCheckMode)
+	}
+
 	// groups owns one BackendList (+ Subscriber, HealthChecker,
 	// HealthReporter) per backend group this instance ends up proxying
 	// to. -group's subscription is started eagerly below so an instance
@@ -106,6 +116,11 @@ func main() {
 		Timeout:          *healthCheckTimeout,
 		FailureThreshold: *unhealthyThreshold,
 		SuccessThreshold: *healthyThreshold,
+		Mode:             dataplane.HealthCheckMode(*healthCheckMode),
+		HTTPPath:         *healthCheckPath,
+		HTTPExpectStatus: *healthCheckExpectStatus,
+		HTTPScheme:       *healthCheckScheme,
+		HTTPHost:         *healthCheckHost,
 	}, *healthReportInterval)
 	defaultBackends := groups.Ensure(*group)
 
