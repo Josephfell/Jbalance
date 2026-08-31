@@ -126,7 +126,10 @@ periodically reports its own health checker's view back to the control
 plane over gRPC (`LB_HEALTH_REPORT_INTERVAL`, default 10s), which the
 dashboard then displays per backend as **Healthy**, **Unhealthy**, or
 **Unknown** (no data plane has reported on that address recently — e.g. no
-data plane is currently subscribed to that group). If multiple data planes
+data plane is currently subscribed to that group). Each data plane probes
+its backends with either a plain **TCP connect** check (the default) or an
+**HTTP** check that GETs a path and requires a matching status class —
+see [Health checking](#health-checking) below. If multiple data planes
 report on the same backend and disagree, it's shown as unhealthy — a
 single instance seeing a backend as down is a real signal worth surfacing,
 even if others can still reach it. Reports older than 30 seconds are
@@ -354,6 +357,79 @@ modes read from the same `BackendList`.
 `tcp` mode) terminate TLS at the listener in either mode; leave them
 unset to accept plaintext TCP.
 
+## Health checking
+
+Every data plane instance probes each of its backends on a timer and takes
+unhealthy ones out of rotation locally, reporting its view back to the
+control plane for the admin dashboard (see **Per-backend health status**
+above). A backend must fail `LB_UNHEALTHY_THRESHOLD` (default 3)
+consecutive probes before being removed and succeed `LB_HEALTHY_THRESHOLD`
+(default 2) consecutive probes before being returned — hysteresis that
+avoids flapping over a single transient blip.
+
+Two probe modes are available, selected by `LB_HEALTH_CHECK_MODE`:
+
+- **`tcp`** (default): a plain TCP connect probe. Protocol-agnostic and
+  good enough to detect a backend that's down or unreachable, but it marks
+  a backend healthy as long as it *accepts* connections — even if the
+  application behind it is returning errors.
+- **`http`**: issues an HTTP `GET` to a configured path and treats the
+  backend as healthy only if the response status matches the expected
+  class. This catches a backend that accepts TCP connections but is
+  actually serving errors (e.g. HTTP 500s) — a failure mode a connect
+  probe silently treats as healthy.
+
+Shared settings (both modes): `LB_HEALTH_CHECK_INTERVAL` (default 5s) and
+`LB_HEALTH_CHECK_TIMEOUT` (default 2s per probe).
+
+HTTP-mode settings:
+
+- `LB_HEALTH_CHECK_PATH` — path to GET (default `/`).
+- `LB_HEALTH_CHECK_EXPECT_STATUS` — exact status code required for healthy;
+  `0` (default) means any `2xx`.
+- `LB_HEALTH_CHECK_SCHEME` — `http` (default) or `https` for the probe.
+- `LB_HEALTH_CHECK_HOST` — override the `Host` header sent with the probe
+  (useful when a backend routes by virtual host); defaults to the backend
+  address.
+
+The health-check configuration is global to the data plane instance and
+applies to every group it proxies to (the default `-group` and any group
+discovered via an L7 route), in both `http` and `tcp` proxy modes.
+
+## Timeouts, retries, and connection draining
+
+The data plane bounds how long it waits on a backend, retries around a
+dead one where it's safe to, and drains in-flight work on shutdown rather
+than cutting it off.
+
+**L7 (HTTP) mode:**
+
+- `LB_PROXY_CONNECT_TIMEOUT` (default 5s) — bounds establishing the TCP
+  connection to a backend.
+- `LB_PROXY_RESPONSE_TIMEOUT` (default 30s; `0` disables) — bounds waiting
+  for the backend's response headers after the request is written.
+- `LB_PROXY_MAX_RETRIES` (default 1) — additional backends to try after a
+  **connection-level** failure. A retry only happens for **bodyless,
+  idempotent** requests (`GET`/`HEAD`/`OPTIONS`/`TRACE`) and only **before
+  any response byte has reached the client** — the failed attempt's output
+  is buffered and discarded, so a retry can still respond cleanly. Requests
+  with a body, and non-idempotent methods (`POST`/`PUT`/…), are never
+  retried.
+- `LB_PROXY_RETRY_BACKOFF` (default 50ms) — base delay between retries
+  (linear: each successive retry waits one more multiple of it).
+
+**L4 (TCP) mode:**
+
+- `LB_TCP_DIAL_TIMEOUT` (default 5s) — bounds connecting to the selected
+  backend before the client connection is closed. (There is no
+  request-level retry at this layer — a raw TCP proxy has no concept of a
+  "request" within a connection.)
+
+**Connection draining (both modes):** on shutdown the instance stops
+accepting new work and then waits up to `LB_SHUTDOWN_GRACE` (default 5s)
+for in-flight requests (L7) or connections (L4) to complete before forcing
+them closed.
+
 ## Monitoring and metrics
 
 Every data plane instance exposes traffic metrics two ways at once, kept
@@ -444,11 +520,47 @@ as an Azure resource (a VM, AKS pod, Container App, etc.), a managed
 identity with **Reader** access on the resource group is the simplest and
 most secure option — no secrets to manage at all.
 
+## Kubernetes provider
+
+Another real backend pool provider is included: `pool.KubernetesProvider`
+reports the ready endpoints of one or more Kubernetes `Service`s as
+backends, read from their `EndpointSlice`s.
+
+```bash
+export LB_PROVIDER=kubernetes
+export LB_K8S_GROUPS=web-tier:default:web:8080,api-tier:default:api:8081
+# optional: point at an explicit kubeconfig for local (out-of-cluster) use
+# export LB_K8S_KUBECONFIG=/path/to/kubeconfig
+
+go run ./cmd/controlplane
+```
+
+`LB_K8S_GROUPS` maps each control-plane group name to the namespace,
+`Service`, and port that back it: `group:namespace:service:port[:weight]`,
+comma-separated for multiple groups.
+
+**How it works:** on each reconcile tick, the provider lists the
+`Service`'s `EndpointSlice`s (`discovery.k8s.io/v1`) and reports each
+**ready, non-terminating** endpoint as `<endpoint-ip>:<port>`. Using
+EndpointSlices rather than the legacy `Endpoints` API means per-endpoint
+readiness/terminating conditions are available directly, so a pod that is
+still starting, failing its readiness probe, or being drained is excluded
+— the same "only serve traffic to things actually ready for it" principle
+the Azure provider applies with running/provisioned state. Endpoint
+addresses are de-duplicated across slices.
+
+**Authentication** uses in-cluster config when the control plane runs as a
+pod (a `ServiceAccount` with permission to list `EndpointSlice`s in the
+target namespaces — no secrets to manage), falling back to a kubeconfig
+file for local development: an explicit `LB_K8S_KUBECONFIG` path if set,
+otherwise the standard loading rules (`KUBECONFIG` env, then the default
+kubeconfig location).
+
 ## Adding a different backend pool provider
 
-To back the control plane with something other than the fake provider or
-Azure VMSS (vCenter, a different cloud, a service registry, etc.),
-implement `pool.Provider`:
+To back the control plane with something other than the fake, Azure VMSS,
+or Kubernetes providers (vCenter, a different cloud, a service registry,
+etc.), implement `pool.Provider`:
 
 ```go
 type Provider interface {
@@ -459,9 +571,10 @@ type Provider interface {
 
 `Groups` should return the pool/group names you want the control plane to
 manage. `Snapshot` should return the current set of running instance
-IP:port pairs for that group. Wire it in alongside the `fake`/`azure-vmss`
-cases in `buildProvider` (`cmd/controlplane/main.go`) — nothing else in the
-control plane or data plane needs to change.
+IP:port pairs for that group. Wire it in alongside the
+`fake`/`azure-vmss`/`kubernetes` cases in `buildProvider`
+(`cmd/controlplane/main.go`) — nothing else in the control plane or data
+plane needs to change.
 
 ## Testing
 
@@ -502,11 +615,8 @@ name).
 
 ## Known limitations (by design, for now)
 
-- No sticky sessions — every algorithm (round robin, least connections,
-  random) is stateless per-request; there's no session affinity to a
-  specific backend.
 - No connection draining delay when a backend is removed by the pool
-  provider itself (as opposed to a manual drain via the admin UI, which
-  does take effect immediately without waiting on in-flight requests to
-  finish) — in-flight requests to a backend the provider stops reporting
-  will fail once it's gone rather than being allowed to complete first.
+  provider itself (as opposed to a manual drain via the admin UI, or a
+  data plane shutting down — both of which do drain in-flight work) —
+  in-flight requests to a backend the provider stops reporting will fail
+  once it's gone rather than being allowed to complete first.
