@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,72 @@ type backendEntry struct {
 	weight      int32
 	healthy     bool
 	activeConns atomic.Int64 // outstanding requests currently proxied to this backend
+
+	// Passive outlier-detection state, guarded by BackendList.mu (mutated
+	// only under the lock in RecordResult / rebuildSlotsLocked, never
+	// atomically like activeConns, since ejection changes selection and
+	// so must be consistent with the slot rebuild).
+	consecErrors int       // consecutive real-traffic errors observed against this backend
+	ejectedUntil time.Time // if in the future, this backend is passively ejected from selection
+	ejectCount   int       // how many times this backend has been ejected (for linear backoff)
+}
+
+// selectable reports whether this backend can be chosen right now: it must
+// be actively-healthy AND not currently passively-ejected. now is passed
+// in so a single rebuild uses one consistent clock reading.
+func (e *backendEntry) selectable(now time.Time) bool {
+	return e.healthy && !e.ejected(now)
+}
+
+// ejected reports whether the backend is currently within a passive
+// ejection window.
+func (e *backendEntry) ejected(now time.Time) bool {
+	return !e.ejectedUntil.IsZero() && now.Before(e.ejectedUntil)
+}
+
+// OutlierConfig configures passive outlier detection (circuit breaking):
+// ejecting a backend from selection after it returns a run of errors to
+// real traffic, then automatically returning it after a cooldown. This is
+// complementary to active health checking (healthcheck.go) — active checks
+// probe on a timer, passive detection reacts to what real requests
+// actually experience, between probes.
+type OutlierConfig struct {
+	// Enabled turns passive outlier detection on. When false, RecordResult
+	// is a cheap no-op and no backend is ever passively ejected.
+	Enabled bool
+	// ConsecutiveErrors is how many back-to-back errors (connection
+	// failure or 5xx) against one backend trigger an ejection. A single
+	// success resets the counter.
+	ConsecutiveErrors int
+	// BaseEjectDuration is the cooldown a backend is ejected for on its
+	// first ejection; repeated ejections back off linearly (2x, 3x, ...)
+	// up to MaxEjectDuration, so a persistently-bad backend isn't probed
+	// back into rotation every few seconds.
+	BaseEjectDuration time.Duration
+	// MaxEjectDuration caps the backed-off ejection cooldown.
+	MaxEjectDuration time.Duration
+	// MaxEjectPercent bounds how much of a group may be ejected at once
+	// (1-100). A request that would push the ejected fraction over this
+	// cap leaves the backend in rotation instead — a safety valve so a
+	// correlated failure (e.g. a shared dependency everyone depends on)
+	// can't empty the whole group and take the service fully down.
+	MaxEjectPercent int
+}
+
+func (c OutlierConfig) withDefaults() OutlierConfig {
+	if c.ConsecutiveErrors <= 0 {
+		c.ConsecutiveErrors = 5
+	}
+	if c.BaseEjectDuration <= 0 {
+		c.BaseEjectDuration = 30 * time.Second
+	}
+	if c.MaxEjectDuration <= 0 {
+		c.MaxEjectDuration = 5 * time.Minute
+	}
+	if c.MaxEjectPercent <= 0 || c.MaxEjectPercent > 100 {
+		c.MaxEjectPercent = 50
+	}
+	return c
 }
 
 // StickyConfig mirrors the sticky-session fields the control plane
@@ -56,6 +123,12 @@ type BackendList struct {
 	slots     []int         // expanded index list into entries, healthy backends only, respecting weight
 	rng       *rand.Rand
 	rngMu     sync.Mutex
+	outlier   OutlierConfig // passive outlier-detection settings (disabled by default)
+	// nextEjectExpiry is the earliest ejectedUntil among currently-ejected
+	// backends, or the zero time if none are ejected. Next uses it to
+	// re-admit a backend the moment its ejection window lapses, without a
+	// background timer.
+	nextEjectExpiry time.Time
 }
 
 // NewBackendList creates an empty backend list defaulting to round robin
@@ -161,8 +234,118 @@ func (b *BackendList) SetHealth(address string, healthy bool) {
 	}
 }
 
+// SetOutlierConfig sets the passive outlier-detection configuration for
+// this group. Applying defaults for any zero field; a config with
+// Enabled=false disables passive ejection entirely.
+func (b *BackendList) SetOutlierConfig(cfg OutlierConfig) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.outlier = cfg.withDefaults()
+	b.outlier.Enabled = cfg.Enabled
+}
+
+// RecordResult reports the outcome of one real proxied request to address,
+// for passive outlier detection. success=false means a connection-level
+// failure or a 5xx response — a run of ConsecutiveErrors of them ejects
+// the backend from selection for a backed-off cooldown; a single success
+// resets its error streak. A no-op when outlier detection is disabled, the
+// address is unknown, or ejecting this backend would exceed
+// MaxEjectPercent of the group (the safety valve that stops a correlated
+// failure from emptying the whole group).
+func (b *BackendList) RecordResult(address string, success bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if !b.outlier.Enabled {
+		return
+	}
+
+	var entry *backendEntry
+	for _, e := range b.entries {
+		if e.address == address {
+			entry = e
+			break
+		}
+	}
+	if entry == nil {
+		return
+	}
+
+	if success {
+		entry.consecErrors = 0
+		return
+	}
+
+	entry.consecErrors++
+	if entry.consecErrors < b.outlier.ConsecutiveErrors {
+		return
+	}
+	if entry.ejected(time.Now()) {
+		return // already ejected; nothing more to do
+	}
+
+	// Safety valve: never eject so many backends that the group is left
+	// with too few. Count how many are currently ejected and refuse this
+	// ejection if it would push the ejected fraction over MaxEjectPercent.
+	now := time.Now()
+	total := len(b.entries)
+	ejected := 0
+	for _, e := range b.entries {
+		if e.ejected(now) {
+			ejected++
+		}
+	}
+	if total > 0 && (ejected+1)*100 > b.outlier.MaxEjectPercent*total {
+		// Leave it in rotation, but keep the error streak so it ejects the
+		// moment headroom frees up (another ejected backend recovers).
+		return
+	}
+
+	entry.ejectCount++
+	dur := time.Duration(entry.ejectCount) * b.outlier.BaseEjectDuration
+	if dur > b.outlier.MaxEjectDuration {
+		dur = b.outlier.MaxEjectDuration
+	}
+	entry.ejectedUntil = now.Add(dur)
+	entry.consecErrors = 0
+	// address is a backend IP:port supplied by the trusted control plane
+	// (not client/attacker input) — the same class of value healthcheck.go
+	// logs when marking a backend up/down. #nosec G706 -- not a log-injection
+	// vector; sanitising trusted internal addresses adds no security value.
+	logEjection(address, dur, b.outlier.ConsecutiveErrors, entry.ejectCount)
+	b.rebuildSlotsLocked()
+}
+
+// logEjection emits the passive-ejection log line. Factored out so the
+// (false-positive) gosec taint annotation lives on one small, obviously
+// trusted-input function rather than inline in RecordResult.
+func logEjection(address string, dur time.Duration, threshold, ejectCount int) {
+	log.Printf("dataplane: backend %s passively ejected for %s after %d consecutive errors (ejection #%d)", address, dur, threshold, ejectCount) //nolint:gosec // G706: address is trusted control-plane data, not attacker input
+}
+
+// EjectedLen returns the current number of passively-ejected backends,
+// for observability/testing.
+func (b *BackendList) EjectedLen() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	now := time.Now()
+	n := 0
+	for _, e := range b.entries {
+		if e.ejected(now) {
+			n++
+		}
+	}
+	return n
+}
+
 // rebuildSlotsLocked recomputes the weighted selection slot list from the
-// currently healthy entries. Callers must hold b.mu.
+// currently selectable entries (actively healthy AND not passively
+// ejected). Callers must hold b.mu.
+//
+// It also records the earliest ejection-expiry time across all currently
+// ejected backends in b.nextEjectExpiry, so Next can cheaply detect when
+// an ejection window has lapsed and trigger a rebuild that returns the
+// backend to rotation — without needing a background timer.
 //
 // Note: for least_connections, nextLeastConnections de-duplicates these
 // slots back down to one-per-backend and uses weight as a load divisor
@@ -170,8 +353,16 @@ func (b *BackendList) SetHealth(address string, healthy bool) {
 // every algorithm so round_robin/random can share it without a separate
 // code path.
 func (b *BackendList) rebuildSlotsLocked() {
+	now := time.Now()
 	slots := make([]int, 0, len(b.entries))
+	var nextExpiry time.Time
 	for i, e := range b.entries {
+		if e.ejected(now) {
+			if nextExpiry.IsZero() || e.ejectedUntil.Before(nextExpiry) {
+				nextExpiry = e.ejectedUntil
+			}
+			continue
+		}
 		if !e.healthy {
 			continue
 		}
@@ -180,6 +371,7 @@ func (b *BackendList) rebuildSlotsLocked() {
 		}
 	}
 	b.slots = slots
+	b.nextEjectExpiry = nextExpiry
 }
 
 // Next returns the next healthy backend address to use, per the group's
@@ -192,6 +384,22 @@ func (b *BackendList) rebuildSlotsLocked() {
 // reflects in-flight requests. For the other algorithms, calling Release
 // is harmless but unnecessary.
 func (b *BackendList) Next() (string, bool) {
+	// Fast path: if an ejection window has lapsed since the last rebuild,
+	// re-admit the backend(s) by rebuilding the slot list. Checked under
+	// the read lock; the rebuild itself takes the write lock.
+	b.mu.RLock()
+	needRebuild := !b.nextEjectExpiry.IsZero() && !time.Now().Before(b.nextEjectExpiry)
+	b.mu.RUnlock()
+	if needRebuild {
+		b.mu.Lock()
+		// Re-check under the write lock in case another goroutine already
+		// rebuilt between the RUnlock and the Lock.
+		if !b.nextEjectExpiry.IsZero() && !time.Now().Before(b.nextEjectExpiry) {
+			b.rebuildSlotsLocked()
+		}
+		b.mu.Unlock()
+	}
+
 	b.mu.RLock()
 	algorithm := b.algorithm
 	slots := b.slots
@@ -325,7 +533,7 @@ func (b *BackendList) PinTo(address string) bool {
 	defer b.mu.RUnlock()
 	for _, e := range b.entries {
 		if e.address == address {
-			if !e.healthy {
+			if !e.selectable(time.Now()) {
 				return false
 			}
 			e.activeConns.Add(1)

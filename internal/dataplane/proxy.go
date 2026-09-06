@@ -256,6 +256,7 @@ func (p *Proxy) serveOnce(w http.ResponseWriter, r *http.Request, addr string, b
 	if buffered {
 		rw := newRetryResponseWriter()
 		p.rp.ServeHTTP(rw, req)
+		backends.RecordResult(addr, !failed && statusCode < 500)
 		if failed {
 			// Discard the buffered error response; caller will retry.
 			return statusCode, true
@@ -265,6 +266,7 @@ func (p *Proxy) serveOnce(w http.ResponseWriter, r *http.Request, addr string, b
 	}
 
 	p.rp.ServeHTTP(w, req)
+	backends.RecordResult(addr, !failed && statusCode < 500)
 	return statusCode, failed
 }
 

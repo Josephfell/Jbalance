@@ -80,6 +80,12 @@ func main() {
 	accessLog := flag.Bool("access-log", envflag.Bool("LB_ACCESS_LOG", false), "(http mode) write one structured access-log line per proxied request (method, path, status, latency, chosen backend, request ID) [env: LB_ACCESS_LOG]")
 	accessLogFormat := flag.String("access-log-format", envflag.String("LB_ACCESS_LOG_FORMAT", "json"), "(http mode) access-log line format: 'json' or 'text' [env: LB_ACCESS_LOG_FORMAT]")
 
+	outlierDetection := flag.Bool("outlier-detection", envflag.Bool("LB_OUTLIER_DETECTION", false), "enable passive outlier detection: eject a backend from rotation after a run of errors on real traffic, then re-admit it after a cooldown (complements active health checks) [env: LB_OUTLIER_DETECTION]")
+	outlierConsecutiveErrors := flag.Int("outlier-consecutive-errors", envflag.Int("LB_OUTLIER_CONSECUTIVE_ERRORS", 5), "consecutive real-traffic errors (connection failure or 5xx) against one backend before it is passively ejected [env: LB_OUTLIER_CONSECUTIVE_ERRORS]")
+	outlierEjectDuration := flag.Duration("outlier-eject-duration", envflag.Duration("LB_OUTLIER_EJECT_DURATION", 30*time.Second), "base cooldown a passively-ejected backend stays out of rotation; repeated ejections back off linearly up to -outlier-max-eject-duration [env: LB_OUTLIER_EJECT_DURATION]")
+	outlierMaxEjectDuration := flag.Duration("outlier-max-eject-duration", envflag.Duration("LB_OUTLIER_MAX_EJECT_DURATION", 5*time.Minute), "cap on the backed-off ejection cooldown [env: LB_OUTLIER_MAX_EJECT_DURATION]")
+	outlierMaxEjectPercent := flag.Int("outlier-max-eject-percent", envflag.Int("LB_OUTLIER_MAX_EJECT_PERCENT", 50), "safety cap: never passively eject more than this percent of a group at once, so a correlated failure can't empty the whole group [env: LB_OUTLIER_MAX_EJECT_PERCENT]")
+
 	metricsAddr := flag.String("metrics-addr", envflag.String("LB_METRICS_ADDR", ":9100"), "address to serve Prometheus metrics on (/metrics), separate from the traffic listener so metrics scraping never competes with proxied paths/connections [env: LB_METRICS_ADDR]")
 	metricsDisable := flag.Bool("metrics-disable", envflag.Bool("LB_METRICS_DISABLE", false), "disable the Prometheus /metrics endpoint entirely [env: LB_METRICS_DISABLE]")
 	metricsReportInterval := flag.Duration("metrics-report-interval", envflag.Duration("LB_METRICS_REPORT_INTERVAL", 10*time.Second), "how often to push a traffic summary to the control plane, for display in the admin web UI's live charts [env: LB_METRICS_REPORT_INTERVAL]")
@@ -183,6 +189,16 @@ func main() {
 		HTTPScheme:       *healthCheckScheme,
 		HTTPHost:         *healthCheckHost,
 	}, *healthReportInterval)
+	groups.SetOutlierConfig(dataplane.OutlierConfig{
+		Enabled:           *outlierDetection,
+		ConsecutiveErrors: *outlierConsecutiveErrors,
+		BaseEjectDuration: *outlierEjectDuration,
+		MaxEjectDuration:  *outlierMaxEjectDuration,
+		MaxEjectPercent:   *outlierMaxEjectPercent,
+	})
+	if *outlierDetection {
+		log.Printf("dataplane: passive outlier detection enabled (%d consecutive errors -> eject for %s, max %d%% of a group)", *outlierConsecutiveErrors, *outlierEjectDuration, *outlierMaxEjectPercent)
+	}
 	defaultBackends := groups.Ensure(*group)
 
 	var metrics *dataplane.Metrics

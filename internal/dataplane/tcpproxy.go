@@ -165,9 +165,11 @@ func (p *TCPProxy) handleConn(ctx context.Context, client net.Conn) {
 	upstream, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", addr)
 	cancel()
 	if err != nil {
+		p.backends.RecordResult(addr, false)
 		log.Printf("dataplane: tcp proxy: failed to connect to backend %s: %v", addr, err)
 		return
 	}
+	p.backends.RecordResult(addr, true)
 	defer func() { _ = upstream.Close() }()
 
 	if p.metrics != nil {
