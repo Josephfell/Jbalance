@@ -442,6 +442,40 @@ Beyond that single pair, three production capabilities are available:
 Like the other listener settings, TLS is a per-instance startup
 configuration (flags/env), not admin-UI runtime state.
 
+## gRPC and HTTP/2 backends
+
+By default the L7 proxy connects to backends over HTTP/1.1 (HTTP/2 is
+still negotiated via ALPN when a backend is reached over TLS). To proxy
+**gRPC** — or any HTTP/2-only backend — that does not terminate TLS, set
+`-backend-protocol=h2c` (`LB_BACKEND_PROTOCOL=h2c`):
+
+```bash
+go run ./cmd/dataplane -backend-protocol=h2c -group=grpc-tier
+```
+
+This does two things:
+
+- **To the backend:** the proxy speaks **h2c** (prior-knowledge HTTP/2
+  over cleartext), which is what a gRPC server without TLS expects. gRPC
+  is HTTP/2 by construction, so this is what lets gRPC calls flow through
+  end to end.
+- **On the listener:** h2c is enabled on the instance's own traffic port,
+  so a plaintext gRPC/HTTP2 client can connect to the proxy. Ordinary
+  HTTP/1.1 clients still work on the same port (the h2c handler upgrades
+  only connections that send the HTTP/2 preface).
+
+When the listener terminates TLS (see [TLS termination](#tls-termination-sni--hot-reload)),
+HTTP/2 is negotiated with clients via ALPN automatically; `-backend-protocol`
+still controls how the proxy talks to the backends behind it.
+
+All the group-level machinery — load-balancing algorithm, health checks,
+outlier detection, weight overrides, and drain — applies to gRPC-tier
+groups exactly as it does to HTTP/1.1 ones. Note that per the retry rules
+under [Timeouts, retries, and connection draining](#timeouts-retries-and-connection-draining),
+requests with a body (which includes gRPC calls) are never retried, so a
+connection-level failure surfaces to the client rather than being silently
+replayed.
+
 ## Health checking
 
 Every data plane instance probes each of its backends on a timer and takes
