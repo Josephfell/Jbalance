@@ -157,8 +157,17 @@ type BackendSet struct {
 	// it's used for. Only meaningful when sticky is true; the data plane
 	// applies a default if unset/zero.
 	StickyTtlSeconds int64 `protobuf:"varint,7,opt,name=sticky_ttl_seconds,json=stickyTtlSeconds,proto3" json:"sticky_ttl_seconds,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Per-client request rate limit for this group, in requests per second.
+	// 0 (default) disables rate limiting. The data plane enforces this with
+	// a token bucket keyed on client IP; a client exceeding the rate gets
+	// HTTP 429. L7 (http) mode only.
+	RateLimitRps float64 `protobuf:"fixed64,8,opt,name=rate_limit_rps,json=rateLimitRps,proto3" json:"rate_limit_rps,omitempty"`
+	// Maximum burst size (token-bucket depth) allowed above the steady
+	// rate_limit_rps. 0 lets the data plane apply a sensible default
+	// (equal to the rate) when rate limiting is enabled.
+	RateLimitBurst int32 `protobuf:"varint,9,opt,name=rate_limit_burst,json=rateLimitBurst,proto3" json:"rate_limit_burst,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *BackendSet) Reset() {
@@ -236,6 +245,20 @@ func (x *BackendSet) GetStickyCookieName() string {
 func (x *BackendSet) GetStickyTtlSeconds() int64 {
 	if x != nil {
 		return x.StickyTtlSeconds
+	}
+	return 0
+}
+
+func (x *BackendSet) GetRateLimitRps() float64 {
+	if x != nil {
+		return x.RateLimitRps
+	}
+	return 0
+}
+
+func (x *BackendSet) GetRateLimitBurst() int32 {
+	if x != nil {
+		return x.RateLimitBurst
 	}
 	return 0
 }
@@ -761,7 +784,7 @@ const file_proto_controlplane_proto_rawDesc = "" +
 	"instanceId\";\n" +
 	"\aBackend\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x16\n" +
-	"\x06weight\x18\x02 \x01(\x05R\x06weight\"\x81\x02\n" +
+	"\x06weight\x18\x02 \x01(\x05R\x06weight\"\xd1\x02\n" +
 	"\n" +
 	"BackendSet\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x121\n" +
@@ -770,7 +793,9 @@ const file_proto_controlplane_proto_rawDesc = "" +
 	"\talgorithm\x18\x04 \x01(\tR\talgorithm\x12\x16\n" +
 	"\x06sticky\x18\x05 \x01(\bR\x06sticky\x12,\n" +
 	"\x12sticky_cookie_name\x18\x06 \x01(\tR\x10stickyCookieName\x12,\n" +
-	"\x12sticky_ttl_seconds\x18\a \x01(\x03R\x10stickyTtlSeconds\"C\n" +
+	"\x12sticky_ttl_seconds\x18\a \x01(\x03R\x10stickyTtlSeconds\x12$\n" +
+	"\x0erate_limit_rps\x18\b \x01(\x01R\frateLimitRps\x12(\n" +
+	"\x10rate_limit_burst\x18\t \x01(\x05R\x0erateLimitBurst\"C\n" +
 	"\rBackendHealth\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x18\n" +
 	"\ahealthy\x18\x02 \x01(\bR\ahealthy\"~\n" +

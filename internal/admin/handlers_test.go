@@ -30,6 +30,10 @@ func (fakeStateProvider) SetSticky(context.Context, string, controlplane.StickyC
 	return nil
 }
 
+func (fakeStateProvider) SetRateLimit(context.Context, string, controlplane.RateLimitConfig) error {
+	return nil
+}
+
 func (fakeStateProvider) MetricsSnapshot() []controlplane.GroupMetricsSnapshot { return nil }
 
 func (fakeStateProvider) MetricsHistory(int) []controlplane.HistoryPoint { return nil }
@@ -402,6 +406,7 @@ type spyStateProvider struct {
 	routes         []controlplane.Route
 	routesSaved    []controlplane.Route
 	stickyCalls    []stickyCall
+	rateLimitCalls []rateLimitCall
 	metrics        []controlplane.GroupMetricsSnapshot
 	history        []controlplane.HistoryPoint
 }
@@ -409,6 +414,11 @@ type spyStateProvider struct {
 type stickyCall struct {
 	group string
 	cfg   controlplane.StickyConfig
+}
+
+type rateLimitCall struct {
+	group string
+	cfg   controlplane.RateLimitConfig
 }
 
 type overrideCall struct {
@@ -439,6 +449,11 @@ func (s *spyStateProvider) SetRoutes(routes []controlplane.Route) error {
 
 func (s *spyStateProvider) SetSticky(_ context.Context, group string, cfg controlplane.StickyConfig) error {
 	s.stickyCalls = append(s.stickyCalls, stickyCall{group, cfg})
+	return s.err
+}
+
+func (s *spyStateProvider) SetRateLimit(_ context.Context, group string, cfg controlplane.RateLimitConfig) error {
+	s.rateLimitCalls = append(s.rateLimitCalls, rateLimitCall{group, cfg})
 	return s.err
 }
 
@@ -1200,5 +1215,38 @@ func TestHandler_Dashboard_RendersMetricsTable(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "web-tier") || !strings.Contains(body, "500") {
 		t.Errorf("expected the metrics table to render the group's traffic summary, got: %s", body)
+	}
+}
+
+func TestHandler_RateLimitSubmit_EnablesWithRPSAndBurst(t *testing.T) {
+	srv, password, spy := newTestServerWithSpy(t)
+	handler := srv.Handler()
+	session := loginAndGetSession(t, handler, password)
+	cookies, csrf := getAuthedCSRFAndCookies(t, handler, "/", session)
+
+	form := url.Values{
+		"csrf_token": {csrf},
+		"group":      {"g1"},
+		"enabled":    {"on"},
+		"rps":        {"25"},
+		"burst":      {"50"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/ratelimit", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected a redirect, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(spy.rateLimitCalls) != 1 {
+		t.Fatalf("expected 1 SetRateLimit call, got %d", len(spy.rateLimitCalls))
+	}
+	call := spy.rateLimitCalls[0]
+	if call.group != "g1" || !call.cfg.Enabled || call.cfg.RPS != 25 || call.cfg.Burst != 50 {
+		t.Errorf("unexpected SetRateLimit call: %+v", call)
 	}
 }

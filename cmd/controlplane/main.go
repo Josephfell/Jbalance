@@ -64,6 +64,7 @@ func main() {
 	adminAlgorithmsPath := flag.String("admin-algorithms-path", envflag.String("LB_ADMIN_ALGORITHMS_PATH", "/var/lib/go-loadbalancer/algorithms.json"), "path to the local file storing per-group load-balancing algorithm selections set via the admin web UI [env: LB_ADMIN_ALGORITHMS_PATH]")
 	adminRoutesPath := flag.String("admin-routes-path", envflag.String("LB_ADMIN_ROUTES_PATH", "/var/lib/go-loadbalancer/routes.json"), "path to the local file storing the L7 route table set via the admin web UI [env: LB_ADMIN_ROUTES_PATH]")
 	adminStickyPath := flag.String("admin-sticky-path", envflag.String("LB_ADMIN_STICKY_PATH", "/var/lib/go-loadbalancer/sticky.json"), "path to the local file storing per-group sticky-session configuration set via the admin web UI [env: LB_ADMIN_STICKY_PATH]")
+	adminRateLimitPath := flag.String("admin-ratelimit-path", envflag.String("LB_ADMIN_RATELIMIT_PATH", "/var/lib/go-loadbalancer/ratelimit.json"), "path to the local file storing per-group rate-limit configuration set via the admin web UI [env: LB_ADMIN_RATELIMIT_PATH]")
 	adminTLSCert := flag.String("admin-tls-cert", envflag.String("LB_ADMIN_TLS_CERT", ""), "path to a TLS certificate for the admin web UI; if unset, it serves plain HTTP [env: LB_ADMIN_TLS_CERT]")
 	adminTLSKey := flag.String("admin-tls-key", envflag.String("LB_ADMIN_TLS_KEY", ""), "path to the TLS private key matching -admin-tls-cert [env: LB_ADMIN_TLS_KEY]")
 	adminTrustForwardedFor := flag.Bool("admin-trust-forwarded-for", envflag.Bool("LB_ADMIN_TRUST_FORWARDED_FOR", false), "trust the X-Forwarded-For header for admin login rate limiting; only enable behind a trusted reverse proxy [env: LB_ADMIN_TRUST_FORWARDED_FOR]")
@@ -97,7 +98,8 @@ func main() {
 	algorithms := controlplane.NewAlgorithmStore(*adminAlgorithmsPath)
 	routes := controlplane.NewRouteStore(*adminRoutesPath)
 	sticky := controlplane.NewStickyStore(*adminStickyPath)
-	srv := controlplane.NewServer(provider, overrides, algorithms, routes, sticky)
+	rateLimits := controlplane.NewRateLimitStore(*adminRateLimitPath)
+	srv := controlplane.NewServer(provider, overrides, algorithms, routes, sticky, rateLimits)
 	go srv.Run(ctx, *reconcileInterval)
 
 	if !*adminDisable {

@@ -29,6 +29,7 @@ type StateProvider interface {
 	Routes() []controlplane.Route
 	SetRoutes(routes []controlplane.Route) error
 	SetSticky(ctx context.Context, group string, cfg controlplane.StickyConfig) error
+	SetRateLimit(ctx context.Context, group string, cfg controlplane.RateLimitConfig) error
 	MetricsSnapshot() []controlplane.GroupMetricsSnapshot
 	MetricsHistory(n int) []controlplane.HistoryPoint
 }
@@ -107,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /override", s.requireAuth(s.handleOverrideSubmit))
 	mux.HandleFunc("POST /algorithm", s.requireAuth(s.handleAlgorithmSubmit))
 	mux.HandleFunc("POST /sticky", s.requireAuth(s.handleStickySubmit))
+	mux.HandleFunc("POST /ratelimit", s.requireAuth(s.handleRateLimitSubmit))
 	mux.HandleFunc("GET /password", s.requireAuth(s.handlePasswordPage))
 	mux.HandleFunc("POST /password", s.requireAuth(s.handlePasswordSubmit))
 	mux.HandleFunc("GET /audit", s.requireAuth(s.handleAuditPage))
@@ -303,6 +305,45 @@ func (s *Server) handleStickySubmit(w http.ResponseWriter, r *http.Request) {
 			state = "enabled"
 		}
 		s.audit.Record(AuditStickyChanged, s.clientIP(r), "sticky sessions "+state+" for group "+group)
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// handleRateLimitSubmit handles enabling/disabling per-client rate
+// limiting for a group and setting its rate/burst, then redirects back to
+// the dashboard. Same single-endpoint + checkbox-presence conventions as
+// handleStickySubmit.
+func (s *Server) handleRateLimitSubmit(w http.ResponseWriter, r *http.Request) {
+	if !s.checkCSRF(r) {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	group := r.FormValue("group")
+	if group == "" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	cfg := controlplane.RateLimitConfig{
+		Enabled: r.FormValue("enabled") == "on",
+	}
+	if rps, err := strconv.ParseFloat(strings.TrimSpace(r.FormValue("rps")), 64); err == nil && rps > 0 {
+		cfg.RPS = rps
+	}
+	if burst, err := strconv.Atoi(strings.TrimSpace(r.FormValue("burst"))); err == nil && burst > 0 {
+		cfg.Burst = burst
+	}
+
+	if err := s.state.SetRateLimit(r.Context(), group, cfg); err != nil {
+		s.audit.Record(AuditRateLimitChanged, s.clientIP(r), "rate-limit change failed for group "+group+": "+err.Error())
+	} else {
+		state := "disabled"
+		if cfg.Enabled {
+			state = "enabled"
+		}
+		s.audit.Record(AuditRateLimitChanged, s.clientIP(r), "rate limiting "+state+" for group "+group)
 	}
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
