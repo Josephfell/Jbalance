@@ -52,6 +52,12 @@ type GroupManager struct {
 
 	mu     sync.RWMutex
 	groups map[string]*BackendList
+
+	// outlierCfg is applied to every BackendList this manager creates, so
+	// passive outlier detection is configured uniformly across the
+	// default group and any group discovered via an L7 route — the same
+	// way healthCfg is.
+	outlierCfg OutlierConfig
 }
 
 // NewGroupManager creates a manager that starts every group's Subscriber/
@@ -69,6 +75,19 @@ func NewGroupManager(baseCtx context.Context, controlPlaneAddr, instanceID strin
 		healthCfg:            healthCfg,
 		healthReportInterval: healthReportInterval,
 		groups:               make(map[string]*BackendList),
+	}
+}
+
+// SetOutlierConfig sets the passive outlier-detection config applied to
+// every group this manager creates. Call it before Ensure is first used
+// (i.e. at startup); groups created afterwards pick it up, and any group
+// already created has it applied here too.
+func (m *GroupManager) SetOutlierConfig(cfg OutlierConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.outlierCfg = cfg
+	for _, bl := range m.groups {
+		bl.SetOutlierConfig(cfg)
 	}
 }
 
@@ -94,6 +113,7 @@ func (m *GroupManager) Ensure(group string) *BackendList {
 	}
 
 	bl = NewBackendList()
+	bl.SetOutlierConfig(m.outlierCfg)
 	m.groups[group] = bl
 
 	sub := NewSubscriber(m.controlPlaneAddr, group, m.instanceID, bl, m.tlsConfig)

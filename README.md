@@ -442,6 +442,46 @@ The health-check configuration is global to the data plane instance and
 applies to every group it proxies to (the default `-group` and any group
 discovered via an L7 route), in both `http` and `tcp` proxy modes.
 
+## Passive outlier detection (circuit breaking)
+
+Active health checks (above) probe each backend on a fixed timer. Between
+those probes a backend can start failing real requests, and active
+checking won't notice until the next tick. **Passive outlier detection**
+closes that gap: it watches the outcome of actual proxied traffic and
+ejects a backend that is *currently* returning errors, then automatically
+re-admits it after a cooldown.
+
+Enable it with `-outlier-detection` (`LB_OUTLIER_DETECTION=true`). It works
+in both `http` and `tcp` modes — in `http` a connection-level failure or a
+`5xx` response counts as an error; in `tcp` a failed dial to the backend
+counts.
+
+- `LB_OUTLIER_CONSECUTIVE_ERRORS` (default 5) — consecutive errors against
+  one backend before it is ejected. A single success resets the counter,
+  so an occasional error never accumulates into an ejection.
+- `LB_OUTLIER_EJECT_DURATION` (default 30s) — how long an ejected backend
+  stays out of rotation. Repeated ejections of the *same* backend back off
+  linearly (2×, 3×, …) up to `LB_OUTLIER_MAX_EJECT_DURATION` (default 5m),
+  so a persistently-bad backend isn't re-admitted every few seconds only
+  to fail again.
+- `LB_OUTLIER_MAX_EJECT_PERCENT` (default 50) — a safety cap: passive
+  detection will never eject more than this percent of a group at once. If
+  a shared dependency fails and every backend starts erroring, ejecting
+  them all would take the service fully down; past the cap, backends stay
+  in rotation (still failing, but reachable) rather than the group going
+  empty. An ejection is granted again as soon as headroom frees up.
+
+Re-admission is **automatic and timer-free**: the moment an ejection
+window lapses, the next backend selection returns that backend to
+rotation. This is complementary to, not a replacement for, active health
+checks — a backend that's genuinely down is still caught by the active
+checker and reported to the admin dashboard; passive detection just reacts
+faster to errors that only show up under real traffic.
+
+Like the health-check settings, outlier detection is a per-instance
+startup configuration (flags/env) applied uniformly to every group the
+instance proxies to, not a per-group admin-UI runtime control.
+
 ## Timeouts, retries, and connection draining
 
 The data plane bounds how long it waits on a backend, retries around a
