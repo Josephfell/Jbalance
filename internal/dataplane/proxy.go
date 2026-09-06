@@ -2,12 +2,15 @@ package dataplane
 
 import (
 	"context"
+	"crypto/tls"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 // ProxyConfig bounds how long the L7 proxy will spend talking to a
@@ -29,6 +32,12 @@ type ProxyConfig struct {
 	// RetryBackoff is the base delay between retry attempts; each
 	// successive retry waits one more multiple of it (linear backoff).
 	RetryBackoff time.Duration
+	// BackendProtocol selects how the proxy connects to backends:
+	//   - "" / "http1": HTTP/1.1 (the default; HTTP/2 is still negotiated
+	//     via ALPN when a backend is reached over TLS).
+	//   - "h2c": prior-knowledge HTTP/2 over cleartext, required to proxy
+	//     gRPC (and other HTTP/2-only) backends that don't terminate TLS.
+	BackendProtocol string
 }
 
 const (
@@ -106,18 +115,34 @@ func NewProxy(routes *RouteTable, groups *GroupManager, metrics *Metrics, cfg Pr
 	cfg = cfg.withDefaults()
 	p := &Proxy{routes: routes, groups: groups, metrics: metrics, cfg: cfg}
 
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   cfg.ConnectTimeout,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   cfg.ConnectTimeout,
-		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: cfg.ResponseTimeout,
+	var transport http.RoundTripper
+	if cfg.BackendProtocol == "h2c" {
+		// Prior-knowledge HTTP/2 over cleartext — dial a plain TCP conn and
+		// speak h2 on it directly, which is what a gRPC backend without TLS
+		// expects. AllowHTTP lets the http2.Transport use a non-TLS conn;
+		// the custom DialTLSContext ignores the tls.Config and returns a
+		// plaintext connection (bounded by the same connect timeout).
+		dialer := &net.Dialer{Timeout: cfg.ConnectTimeout, KeepAlive: 30 * time.Second}
+		transport = &http2.Transport{
+			AllowHTTP: true,
+			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+				return dialer.DialContext(ctx, network, addr)
+			},
+		}
+	} else {
+		transport = &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   cfg.ConnectTimeout,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   cfg.ConnectTimeout,
+			ExpectContinueTimeout: 1 * time.Second,
+			ResponseHeaderTimeout: cfg.ResponseTimeout,
+		}
 	}
 
 	p.rp = &httputil.ReverseProxy{
