@@ -481,6 +481,39 @@ appear in either view, rather than showing misleading all-zero values —
 the same "no data yet" distinction the health-status display already
 makes.
 
+## Access logging and request tracing
+
+Metrics tell you how much traffic there is and how fast it is in
+aggregate; an **access log** tells you what happened to one specific
+request. The two are complementary, and read by different audiences (a
+Prometheus scrape or the admin chart vs. a human tailing logs or a
+log-aggregation pipeline), so access logging is a separate, opt-in output
+on the data plane's L7 (HTTP) mode.
+
+Enable it with `-access-log` (`LB_ACCESS_LOG=true`). Each proxied request
+then produces one line capturing the method, host, path, response status,
+bytes written, latency, client IP, resolved backend group, the backend
+the request was finally sent to, how many retries it took, and the
+request's trace ID. Choose the line format with `-access-log-format`
+(`LB_ACCESS_LOG_FORMAT`): `json` (default — one JSON object per request,
+ready for structured querying) or `text` (a compact human-readable line).
+
+**Request tracing.** Every request is stamped with an `X-Request-Id`: an
+inbound one is honoured (so an ID assigned by an upstream edge/CDN flows
+through unchanged and correlates across every hop), otherwise a fresh
+random 128-bit ID is generated. The ID is echoed back to the client on the
+response and forwarded to the backend, and it appears in every access-log
+line — so a single request can be traced client → proxy → backend by
+grepping one value. Tracing runs **even when `-access-log` is off**, since
+propagating a correlation ID is cheap and useful on its own; the flag only
+controls whether a per-request log line is also written.
+
+Access logging is a per-instance startup setting (like the health-check
+mode and proxy timeout flags), not a per-group runtime control, so it is
+configured by flag/env rather than from the admin UI. It applies to `http`
+mode only — an L4/`tcp` proxy has no request boundaries to log within a
+connection (the existing connection-level metrics cover that layer).
+
 ## Azure VMSS provider
 
 A real backend pool provider is included: `pool.AzureVMSSProvider` reports

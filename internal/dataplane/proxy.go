@@ -202,6 +202,10 @@ func (p *Proxy) serveWithRetries(w http.ResponseWriter, r *http.Request, group s
 			return 0, false
 		}
 
+		// Record the backend actually chosen for this (possibly final)
+		// attempt, plus how many retries preceded it, for the access log.
+		recordBackend(r.Context(), group, addr, attempt)
+
 		lastAttempt := attempt == attempts-1
 		statusCode, upstreamErr := p.serveOnce(w, r, addr, backends, retryable && !lastAttempt)
 

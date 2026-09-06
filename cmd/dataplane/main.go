@@ -74,6 +74,9 @@ func main() {
 	tcpDialTimeout := flag.Duration("tcp-dial-timeout", envflag.Duration("LB_TCP_DIAL_TIMEOUT", 5*time.Second), "(tcp mode) timeout for connecting to the selected backend [env: LB_TCP_DIAL_TIMEOUT]")
 	shutdownGrace := flag.Duration("shutdown-grace", envflag.Duration("LB_SHUTDOWN_GRACE", 5*time.Second), "how long to wait for in-flight requests/connections to drain on shutdown before forcing close [env: LB_SHUTDOWN_GRACE]")
 
+	accessLog := flag.Bool("access-log", envflag.Bool("LB_ACCESS_LOG", false), "(http mode) write one structured access-log line per proxied request (method, path, status, latency, chosen backend, request ID) [env: LB_ACCESS_LOG]")
+	accessLogFormat := flag.String("access-log-format", envflag.String("LB_ACCESS_LOG_FORMAT", "json"), "(http mode) access-log line format: 'json' or 'text' [env: LB_ACCESS_LOG_FORMAT]")
+
 	metricsAddr := flag.String("metrics-addr", envflag.String("LB_METRICS_ADDR", ":9100"), "address to serve Prometheus metrics on (/metrics), separate from the traffic listener so metrics scraping never competes with proxied paths/connections [env: LB_METRICS_ADDR]")
 	metricsDisable := flag.Bool("metrics-disable", envflag.Bool("LB_METRICS_DISABLE", false), "disable the Prometheus /metrics endpoint entirely [env: LB_METRICS_DISABLE]")
 	metricsReportInterval := flag.Duration("metrics-report-interval", envflag.Duration("LB_METRICS_REPORT_INTERVAL", 10*time.Second), "how often to push a traffic summary to the control plane, for display in the admin web UI's live charts [env: LB_METRICS_REPORT_INTERVAL]")
@@ -167,7 +170,14 @@ func main() {
 	})
 
 	mux := http.NewServeMux()
-	mux.Handle("/", proxy.Handler())
+	accessLogCfg := dataplane.AccessLogConfig{
+		Enabled: *accessLog,
+		Format:  dataplane.AccessLogFormat(*accessLogFormat),
+	}
+	mux.Handle("/", dataplane.AccessLogMiddleware(proxy.Handler(), accessLogCfg, nil))
+	if *accessLog {
+		log.Printf("dataplane: access logging enabled (format=%s)", *accessLogFormat)
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("ok")); err != nil {
