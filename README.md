@@ -253,6 +253,19 @@ An empty table — or a request matching no rule — falls back to the
 instance's own `-group`, so upgrading to a version with L7 routing changes
 nothing for a deployment that never configures a route.
 
+**Weighted traffic splitting (canary).** A rule can send its matched
+traffic to a *weighted set* of groups instead of a single target — for
+canary rollouts and blue/green shifts. In the routes editor's **Split
+(canary)** field, enter `group:weight, group:weight` (e.g.
+`web-stable:90, web-canary:10`) and each matching request is sent to one
+of those groups chosen by weight — here ~90% to `web-stable`, ~10% to
+`web-canary`. Leave the field blank to use the row's single target group
+as before. A split group is discovered and subscribed to lazily, exactly
+like any other routed group, so pointing 10% of traffic at a brand-new
+canary group needs no restart. To shift the rollout, just change the
+weights and save; to finish it, blank the split and point the target
+group at the promoted version.
+
 The route table is global (not per-group) and pushed to every connected
 data plane instance the moment it's saved, over its own gRPC stream
 (`StreamRoutes`, alongside each group's `StreamBackends` stream). A data

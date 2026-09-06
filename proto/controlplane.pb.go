@@ -469,10 +469,16 @@ type Route struct {
 	PathPrefix string `protobuf:"bytes,2,opt,name=path_prefix,json=pathPrefix,proto3" json:"path_prefix,omitempty"`
 	// HTTP methods this rule applies to. Empty means any method.
 	Methods []string `protobuf:"bytes,3,rep,name=methods,proto3" json:"methods,omitempty"`
-	// Backend group a matching request is proxied to.
+	// Backend group a matching request is proxied to. Used when `split`
+	// is empty (the common single-target case).
 	TargetGroup string `protobuf:"bytes,4,opt,name=target_group,json=targetGroup,proto3" json:"target_group,omitempty"`
 	// Display name/comment for the admin UI; not evaluated.
-	Name          string `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
+	Name string `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
+	// Weighted traffic split: when non-empty, a matching request is sent
+	// to one of these groups chosen by weight (e.g. 90/10 stable/canary)
+	// rather than always to target_group. When empty, target_group is
+	// used. A single-entry split is equivalent to target_group.
+	Split         []*RouteTarget `protobuf:"bytes,6,rep,name=split,proto3" json:"split,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -542,6 +548,70 @@ func (x *Route) GetName() string {
 	return ""
 }
 
+func (x *Route) GetSplit() []*RouteTarget {
+	if x != nil {
+		return x.Split
+	}
+	return nil
+}
+
+// RouteTarget is one weighted destination of a canary/split route rule.
+type RouteTarget struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Backend group this share of the traffic is sent to.
+	Group string `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	// Relative weight of this target within the rule's split. Defaults to
+	// 1 when unset/zero. A target's share is its weight over the sum of
+	// all the rule's target weights.
+	Weight        int32 `protobuf:"varint,2,opt,name=weight,proto3" json:"weight,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RouteTarget) Reset() {
+	*x = RouteTarget{}
+	mi := &file_proto_controlplane_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouteTarget) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouteTarget) ProtoMessage() {}
+
+func (x *RouteTarget) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_controlplane_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouteTarget.ProtoReflect.Descriptor instead.
+func (*RouteTarget) Descriptor() ([]byte, []int) {
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *RouteTarget) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
+func (x *RouteTarget) GetWeight() int32 {
+	if x != nil {
+		return x.Weight
+	}
+	return 0
+}
+
 type RouteTable struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Rules in evaluation order — the data plane checks them top to bottom
@@ -559,7 +629,7 @@ type RouteTable struct {
 
 func (x *RouteTable) Reset() {
 	*x = RouteTable{}
-	mi := &file_proto_controlplane_proto_msgTypes[8]
+	mi := &file_proto_controlplane_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -571,7 +641,7 @@ func (x *RouteTable) String() string {
 func (*RouteTable) ProtoMessage() {}
 
 func (x *RouteTable) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_controlplane_proto_msgTypes[8]
+	mi := &file_proto_controlplane_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -584,7 +654,7 @@ func (x *RouteTable) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteTable.ProtoReflect.Descriptor instead.
 func (*RouteTable) Descriptor() ([]byte, []int) {
-	return file_proto_controlplane_proto_rawDescGZIP(), []int{8}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RouteTable) GetRoutes() []*Route {
@@ -622,7 +692,7 @@ type GroupMetrics struct {
 
 func (x *GroupMetrics) Reset() {
 	*x = GroupMetrics{}
-	mi := &file_proto_controlplane_proto_msgTypes[9]
+	mi := &file_proto_controlplane_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -634,7 +704,7 @@ func (x *GroupMetrics) String() string {
 func (*GroupMetrics) ProtoMessage() {}
 
 func (x *GroupMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_controlplane_proto_msgTypes[9]
+	mi := &file_proto_controlplane_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -647,7 +717,7 @@ func (x *GroupMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GroupMetrics.ProtoReflect.Descriptor instead.
 func (*GroupMetrics) Descriptor() ([]byte, []int) {
-	return file_proto_controlplane_proto_rawDescGZIP(), []int{9}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GroupMetrics) GetGroup() string {
@@ -695,7 +765,7 @@ type MetricsReport struct {
 
 func (x *MetricsReport) Reset() {
 	*x = MetricsReport{}
-	mi := &file_proto_controlplane_proto_msgTypes[10]
+	mi := &file_proto_controlplane_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -707,7 +777,7 @@ func (x *MetricsReport) String() string {
 func (*MetricsReport) ProtoMessage() {}
 
 func (x *MetricsReport) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_controlplane_proto_msgTypes[10]
+	mi := &file_proto_controlplane_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -720,7 +790,7 @@ func (x *MetricsReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricsReport.ProtoReflect.Descriptor instead.
 func (*MetricsReport) Descriptor() ([]byte, []int) {
-	return file_proto_controlplane_proto_rawDescGZIP(), []int{10}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *MetricsReport) GetInstanceId() string {
@@ -745,7 +815,7 @@ type MetricsReportAck struct {
 
 func (x *MetricsReportAck) Reset() {
 	*x = MetricsReportAck{}
-	mi := &file_proto_controlplane_proto_msgTypes[11]
+	mi := &file_proto_controlplane_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -757,7 +827,7 @@ func (x *MetricsReportAck) String() string {
 func (*MetricsReportAck) ProtoMessage() {}
 
 func (x *MetricsReportAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_controlplane_proto_msgTypes[11]
+	mi := &file_proto_controlplane_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -770,7 +840,7 @@ func (x *MetricsReportAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricsReportAck.ProtoReflect.Descriptor instead.
 func (*MetricsReportAck) Descriptor() ([]byte, []int) {
-	return file_proto_controlplane_proto_rawDescGZIP(), []int{11}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{12}
 }
 
 var File_proto_controlplane_proto protoreflect.FileDescriptor
@@ -807,14 +877,18 @@ const file_proto_controlplane_proto_rawDesc = "" +
 	"\x0fHealthReportAck\"6\n" +
 	"\x13StreamRoutesRequest\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
-	"instanceId\"\x8d\x01\n" +
+	"instanceId\"\xbe\x01\n" +
 	"\x05Route\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x1f\n" +
 	"\vpath_prefix\x18\x02 \x01(\tR\n" +
 	"pathPrefix\x12\x18\n" +
 	"\amethods\x18\x03 \x03(\tR\amethods\x12!\n" +
 	"\ftarget_group\x18\x04 \x01(\tR\vtargetGroup\x12\x12\n" +
-	"\x04name\x18\x05 \x01(\tR\x04name\"S\n" +
+	"\x04name\x18\x05 \x01(\tR\x04name\x12/\n" +
+	"\x05split\x18\x06 \x03(\v2\x19.controlplane.RouteTargetR\x05split\";\n" +
+	"\vRouteTarget\x12\x14\n" +
+	"\x05group\x18\x01 \x01(\tR\x05group\x12\x16\n" +
+	"\x06weight\x18\x02 \x01(\x05R\x06weight\"S\n" +
 	"\n" +
 	"RouteTable\x12+\n" +
 	"\x06routes\x18\x01 \x03(\v2\x13.controlplane.RouteR\x06routes\x12\x18\n" +
@@ -848,7 +922,7 @@ func file_proto_controlplane_proto_rawDescGZIP() []byte {
 	return file_proto_controlplane_proto_rawDescData
 }
 
-var file_proto_controlplane_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_proto_controlplane_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_proto_controlplane_proto_goTypes = []any{
 	(*StreamBackendsRequest)(nil), // 0: controlplane.StreamBackendsRequest
 	(*Backend)(nil),               // 1: controlplane.Backend
@@ -858,29 +932,31 @@ var file_proto_controlplane_proto_goTypes = []any{
 	(*HealthReportAck)(nil),       // 5: controlplane.HealthReportAck
 	(*StreamRoutesRequest)(nil),   // 6: controlplane.StreamRoutesRequest
 	(*Route)(nil),                 // 7: controlplane.Route
-	(*RouteTable)(nil),            // 8: controlplane.RouteTable
-	(*GroupMetrics)(nil),          // 9: controlplane.GroupMetrics
-	(*MetricsReport)(nil),         // 10: controlplane.MetricsReport
-	(*MetricsReportAck)(nil),      // 11: controlplane.MetricsReportAck
+	(*RouteTarget)(nil),           // 8: controlplane.RouteTarget
+	(*RouteTable)(nil),            // 9: controlplane.RouteTable
+	(*GroupMetrics)(nil),          // 10: controlplane.GroupMetrics
+	(*MetricsReport)(nil),         // 11: controlplane.MetricsReport
+	(*MetricsReportAck)(nil),      // 12: controlplane.MetricsReportAck
 }
 var file_proto_controlplane_proto_depIdxs = []int32{
 	1,  // 0: controlplane.BackendSet.backends:type_name -> controlplane.Backend
 	3,  // 1: controlplane.HealthReport.backends:type_name -> controlplane.BackendHealth
-	7,  // 2: controlplane.RouteTable.routes:type_name -> controlplane.Route
-	9,  // 3: controlplane.MetricsReport.groups:type_name -> controlplane.GroupMetrics
-	0,  // 4: controlplane.ControlPlane.StreamBackends:input_type -> controlplane.StreamBackendsRequest
-	4,  // 5: controlplane.ControlPlane.ReportHealth:input_type -> controlplane.HealthReport
-	6,  // 6: controlplane.ControlPlane.StreamRoutes:input_type -> controlplane.StreamRoutesRequest
-	10, // 7: controlplane.ControlPlane.ReportMetrics:input_type -> controlplane.MetricsReport
-	2,  // 8: controlplane.ControlPlane.StreamBackends:output_type -> controlplane.BackendSet
-	5,  // 9: controlplane.ControlPlane.ReportHealth:output_type -> controlplane.HealthReportAck
-	8,  // 10: controlplane.ControlPlane.StreamRoutes:output_type -> controlplane.RouteTable
-	11, // 11: controlplane.ControlPlane.ReportMetrics:output_type -> controlplane.MetricsReportAck
-	8,  // [8:12] is the sub-list for method output_type
-	4,  // [4:8] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	8,  // 2: controlplane.Route.split:type_name -> controlplane.RouteTarget
+	7,  // 3: controlplane.RouteTable.routes:type_name -> controlplane.Route
+	10, // 4: controlplane.MetricsReport.groups:type_name -> controlplane.GroupMetrics
+	0,  // 5: controlplane.ControlPlane.StreamBackends:input_type -> controlplane.StreamBackendsRequest
+	4,  // 6: controlplane.ControlPlane.ReportHealth:input_type -> controlplane.HealthReport
+	6,  // 7: controlplane.ControlPlane.StreamRoutes:input_type -> controlplane.StreamRoutesRequest
+	11, // 8: controlplane.ControlPlane.ReportMetrics:input_type -> controlplane.MetricsReport
+	2,  // 9: controlplane.ControlPlane.StreamBackends:output_type -> controlplane.BackendSet
+	5,  // 10: controlplane.ControlPlane.ReportHealth:output_type -> controlplane.HealthReportAck
+	9,  // 11: controlplane.ControlPlane.StreamRoutes:output_type -> controlplane.RouteTable
+	12, // 12: controlplane.ControlPlane.ReportMetrics:output_type -> controlplane.MetricsReportAck
+	9,  // [9:13] is the sub-list for method output_type
+	5,  // [5:9] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_proto_controlplane_proto_init() }
@@ -894,7 +970,7 @@ func file_proto_controlplane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_controlplane_proto_rawDesc), len(file_proto_controlplane_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

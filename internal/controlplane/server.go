@@ -283,12 +283,20 @@ func (s *Server) publishRoutes() {
 		Version: s.routes.Version(),
 	}
 	for _, r := range s.routes.Routes() {
+		var split []*pb.RouteTarget
+		for _, tgt := range r.Split {
+			if tgt.Group == "" {
+				continue
+			}
+			split = append(split, &pb.RouteTarget{Group: tgt.Group, Weight: tgt.Weight})
+		}
 		table.Routes = append(table.Routes, &pb.Route{
 			Host:        r.Host,
 			PathPrefix:  r.PathPrefix,
 			Methods:     r.Methods,
 			TargetGroup: r.TargetGroup,
 			Name:        r.Name,
+			Split:       split,
 		})
 	}
 

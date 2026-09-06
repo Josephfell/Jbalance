@@ -25,9 +25,23 @@ type Route struct {
 	// method.
 	Methods []string `json:"methods,omitempty"`
 	// TargetGroup is the backend group a matching request is sent to.
+	// Used when Split is empty (the common single-target case).
 	TargetGroup string `json:"targetGroup"`
+	// Split, when non-empty, is a weighted set of destination groups for
+	// canary / traffic splitting: a matching request is sent to one of
+	// them chosen by weight, rather than always to TargetGroup.
+	Split []RouteTarget `json:"split,omitempty"`
 	// Name is a display label for the admin UI; not evaluated.
 	Name string `json:"name,omitempty"`
+}
+
+// RouteTarget is one weighted destination of a split (canary) route rule.
+type RouteTarget struct {
+	// Group is the backend group this share of the traffic goes to.
+	Group string `json:"group"`
+	// Weight is this target's relative share within the split. Defaults
+	// to 1 when unset/zero.
+	Weight int32 `json:"weight,omitempty"`
 }
 
 // Matches reports whether this route applies to a request with the given

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"math"
 	"net"
 	"net/http"
 	"sort"
@@ -377,6 +378,7 @@ type routeRow struct {
 	PathPrefix  string
 	Methods     string
 	TargetGroup string
+	Split       string
 	Name        string
 }
 
@@ -389,6 +391,7 @@ func routesToRows(routes []controlplane.Route) []routeRow {
 			PathPrefix:  r.PathPrefix,
 			Methods:     strings.Join(r.Methods, ", "),
 			TargetGroup: r.TargetGroup,
+			Split:       formatSplit(r.Split),
 			Name:        r.Name,
 		}
 	}
@@ -453,6 +456,7 @@ func (s *Server) handleRoutesSubmit(w http.ResponseWriter, r *http.Request) {
 	targetGroups := r.Form["target_group"]
 	names := r.Form["name"]
 	actions := r.Form["action"]
+	splits := r.Form["split"]
 
 	n := len(hosts)
 	type indexed struct {
@@ -476,6 +480,7 @@ func (s *Server) handleRoutesSubmit(w http.ResponseWriter, r *http.Request) {
 				PathPrefix:  valueAt(pathPrefixes, i),
 				Methods:     splitMethods(valueAt(methodsList, i)),
 				TargetGroup: targetGroup,
+				Split:       parseSplit(valueAt(splits, i)),
 				Name:        valueAt(names, i),
 			},
 		})
@@ -527,6 +532,62 @@ func splitMethods(s string) []string {
 		return nil
 	}
 	return out
+}
+
+// parseSplit parses a canary/traffic-split field of the form
+// "group:weight, group:weight" (e.g. "web-stable:90, web-canary:10") into
+// RouteTargets. A bare "group" with no ":weight" defaults to weight 1.
+// Returns nil for empty input, so a route with no split falls back to its
+// single TargetGroup. Entries with an empty group or an unparseable /
+// non-positive weight are dropped rather than saved as broken config.
+func parseSplit(s string) []controlplane.RouteTarget {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var out []controlplane.RouteTarget
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		group := part
+		weight := int32(1)
+		if i := strings.LastIndex(part, ":"); i >= 0 {
+			group = strings.TrimSpace(part[:i])
+			if w, err := strconv.Atoi(strings.TrimSpace(part[i+1:])); err == nil && w > 0 {
+				if w > math.MaxInt32 {
+					w = math.MaxInt32
+				}
+				weight = int32(w) //nolint:gosec // G109: clamped to MaxInt32 immediately above
+			} else {
+				continue // malformed weight — drop the entry
+			}
+		}
+		if group == "" {
+			continue
+		}
+		out = append(out, controlplane.RouteTarget{Group: group, Weight: weight})
+	}
+	return out
+}
+
+// formatSplit renders RouteTargets back into the "group:weight, ..." form
+// the routes editor's split field uses, so a saved split round-trips in
+// the UI.
+func formatSplit(targets []controlplane.RouteTarget) string {
+	if len(targets) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(targets))
+	for _, t := range targets {
+		w := t.Weight
+		if w <= 0 {
+			w = 1
+		}
+		parts = append(parts, t.Group+":"+strconv.Itoa(int(w)))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // metricsChartPoint is the small JSON shape the dashboard's chart JS
