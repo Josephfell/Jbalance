@@ -122,10 +122,26 @@ message Route {
   string path_prefix = 2;
   // HTTP methods this rule applies to. Empty means any method.
   repeated string methods = 3;
-  // Backend group a matching request is proxied to.
+  // Backend group a matching request is proxied to. Used when `split`
+  // is empty (the common single-target case).
   string target_group = 4;
   // Display name/comment for the admin UI; not evaluated.
   string name = 5;
+  // Weighted traffic split: when non-empty, a matching request is sent
+  // to one of these groups chosen by weight (e.g. 90/10 stable/canary)
+  // rather than always to target_group. When empty, target_group is
+  // used. A single-entry split is equivalent to target_group.
+  repeated RouteTarget split = 6;
+}
+
+// RouteTarget is one weighted destination of a canary/split route rule.
+message RouteTarget {
+  // Backend group this share of the traffic is sent to.
+  string group = 1;
+  // Relative weight of this target within the rule's split. Defaults to
+  // 1 when unset/zero. A target's share is its weight over the sum of
+  // all the rule's target weights.
+  int32 weight = 2;
 }
 
 message RouteTable {

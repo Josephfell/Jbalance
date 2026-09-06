@@ -685,6 +685,7 @@ const templatesSource = `
                 <th class="col-path">Path prefix</th>
                 <th class="col-methods">Methods</th>
                 <th class="col-group">Target group</th>
+                <th class="col-split">Split (canary)</th>
                 <th class="col-del">Remove</th>
               </tr>
               <tbody id="routes-body">
@@ -704,6 +705,7 @@ const templatesSource = `
                       {{end}}
                     </select>
                   </td>
+                  <td><input type="text" name="split" value="{{.Split}}" placeholder="e.g. stable:90, canary:10"></td>
                   <td class="col-del">
                     <input type="hidden" name="order" value="{{.Order}}">
                     <input type="hidden" name="action" value="keep">
@@ -781,6 +783,13 @@ const templatesSource = `
         var groupTd = document.createElement('td');
         groupTd.appendChild(buildGroupSelect());
         tr.appendChild(groupTd);
+
+        var splitTd = document.createElement('td');
+        var splitInput = document.createElement('input');
+        splitInput.type = 'text'; splitInput.name = 'split';
+        splitInput.placeholder = 'e.g. stable:90, canary:10';
+        splitTd.appendChild(splitInput);
+        tr.appendChild(splitTd);
 
         var delTd = document.createElement('td');
         delTd.className = 'col-del';
