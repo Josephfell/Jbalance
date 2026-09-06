@@ -124,6 +124,9 @@ type BackendList struct {
 	rng       *rand.Rand
 	rngMu     sync.Mutex
 	outlier   OutlierConfig // passive outlier-detection settings (disabled by default)
+	// rateLimit holds the group's per-client rate limiter, updated from
+	// each BackendSet. Never nil after NewBackendList.
+	rateLimit *groupRateLimiter
 	// nextEjectExpiry is the earliest ejectedUntil among currently-ejected
 	// backends, or the zero time if none are ejected. Next uses it to
 	// re-admit a backend the moment its ejection window lapses, without a
@@ -138,7 +141,8 @@ func NewBackendList() *BackendList {
 		algorithm: AlgorithmRoundRobin,
 		// Backend selection weighting only, not security-sensitive — a
 		// predictable seed here has no meaningful attack surface.
-		rng: rand.New(rand.NewSource(time.Now().UnixNano())),
+		rng:       rand.New(rand.NewSource(time.Now().UnixNano())),
+		rateLimit: newGroupRateLimiter(),
 	}
 }
 
@@ -195,6 +199,13 @@ func (b *BackendList) Update(set *pb.BackendSet) {
 		Enabled:    set.Sticky,
 		CookieName: set.StickyCookieName,
 		TTL:        time.Duration(set.StickyTtlSeconds) * time.Second,
+	}
+	if b.rateLimit != nil {
+		b.rateLimit.setConfig(RateLimitConfig{
+			Enabled: set.RateLimitRps > 0,
+			RPS:     set.RateLimitRps,
+			Burst:   int(set.RateLimitBurst),
+		})
 	}
 	b.rebuildSlotsLocked()
 }
@@ -519,6 +530,16 @@ func (b *BackendList) Sticky() StickyConfig {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.sticky
+}
+
+// RateLimitAllow reports whether a request from clientKey is permitted
+// under the group's current per-client rate limit, consuming a token if
+// so. Always true when rate limiting is disabled for the group.
+func (b *BackendList) RateLimitAllow(clientKey string) bool {
+	if b.rateLimit == nil {
+		return true
+	}
+	return b.rateLimit.allow(clientKey)
 }
 
 // PinTo increments address's active-connection counter without going

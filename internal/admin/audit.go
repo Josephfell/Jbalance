@@ -24,6 +24,7 @@ const (
 	AuditAlgorithmChanged AuditEventType = "algorithm_changed"
 	AuditRoutesChanged    AuditEventType = "routes_changed"
 	AuditStickyChanged    AuditEventType = "sticky_changed"
+	AuditRateLimitChanged AuditEventType = "ratelimit_changed"
 )
 
 // AuditEntry is one recorded admin-UI event.

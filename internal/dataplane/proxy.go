@@ -173,6 +173,17 @@ func (p *Proxy) Handler() http.Handler {
 			defer p.metrics.SetActiveConnections(group, -1)
 		}
 
+		// Per-client rate limiting (per group, pushed from the control
+		// plane). A client over its limit gets 429 before any backend is
+		// selected.
+		if !backends.RateLimitAllow(clientIP(r)) {
+			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			if p.metrics != nil {
+				p.metrics.ObserveHTTPRequest(group, http.StatusTooManyRequests, time.Since(start))
+			}
+			return
+		}
+
 		statusCode, ok := p.serveWithRetries(w, r, group, backends)
 		if !ok {
 			http.Error(w, "no healthy backends available", http.StatusServiceUnavailable)

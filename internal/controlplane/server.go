@@ -8,6 +8,7 @@ package controlplane
 import (
 	"context"
 	"log"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -86,6 +87,7 @@ type Server struct {
 	algorithms *AlgorithmStore
 	routes     *RouteStore
 	sticky     *StickyStore
+	rateLimits *RateLimitStore
 
 	mu   sync.Mutex
 	subs map[string]map[chan *pb.BackendSet]struct{} // group -> set of subscriber channels
@@ -112,12 +114,12 @@ type Server struct {
 }
 
 // NewServer creates a control plane server backed by the given provider.
-// overrides, algorithms, routes, and sticky may be nil, in which case
-// manual weight/drain overrides are disabled, every group uses
+// overrides, algorithms, routes, sticky, and rateLimits may be nil, in
+// which case manual weight/drain overrides are disabled, every group uses
 // AlgorithmRoundRobin, no L7 routes are configured, and sticky sessions
-// are disabled everywhere (empty in-memory stores are used instead so
-// callers don't need nil checks everywhere).
-func NewServer(provider pool.Provider, overrides *OverrideStore, algorithms *AlgorithmStore, routes *RouteStore, sticky *StickyStore) *Server {
+// and rate limiting are disabled everywhere (empty in-memory stores are
+// used instead so callers don't need nil checks everywhere).
+func NewServer(provider pool.Provider, overrides *OverrideStore, algorithms *AlgorithmStore, routes *RouteStore, sticky *StickyStore, rateLimits *RateLimitStore) *Server {
 	if overrides == nil {
 		overrides = NewOverrideStore("")
 	}
@@ -130,12 +132,16 @@ func NewServer(provider pool.Provider, overrides *OverrideStore, algorithms *Alg
 	if sticky == nil {
 		sticky = NewStickyStore("")
 	}
+	if rateLimits == nil {
+		rateLimits = NewRateLimitStore("")
+	}
 	return &Server{
 		provider:   provider,
 		overrides:  overrides,
 		algorithms: algorithms,
 		routes:     routes,
 		sticky:     sticky,
+		rateLimits: rateLimits,
 		subs:       make(map[string]map[chan *pb.BackendSet]struct{}),
 		last:       make(map[string]*pb.BackendSet),
 		health:     make(map[backendHealthKey]healthEntry),
@@ -233,6 +239,21 @@ func (s *Server) SetSticky(ctx context.Context, group string, cfg StickyConfig) 
 // Sticky returns group's current sticky-session configuration.
 func (s *Server) Sticky(group string) StickyConfig {
 	return s.sticky.Get(group)
+}
+
+// SetRateLimit sets group's per-client rate-limit configuration and
+// immediately re-publishes so connected data planes enforce it right away.
+func (s *Server) SetRateLimit(ctx context.Context, group string, cfg RateLimitConfig) error {
+	if err := s.rateLimits.Set(group, cfg); err != nil {
+		return err
+	}
+	s.forceRepublish(ctx, group)
+	return nil
+}
+
+// RateLimit returns group's current rate-limit configuration.
+func (s *Server) RateLimit(group string) RateLimitConfig {
+	return s.rateLimits.Get(group)
 }
 
 // SetRoutes replaces the entire L7 route table and immediately pushes it
@@ -339,7 +360,7 @@ func (s *Server) forceRepublish(ctx context.Context, group string) {
 	// always produce a visible update even if the resulting BackendSet
 	// happens to look identical to what a stale s.last already holds in
 	// an edge case (e.g. re-applying the same override value).
-	next := snapshotToBackendSet(group, snap, s.overrides.GroupOverrides(group), s.algorithms.Get(group), s.sticky.Get(group))
+	next := snapshotToBackendSet(group, snap, s.overrides.GroupOverrides(group), s.algorithms.Get(group), s.sticky.Get(group), s.rateLimits.Get(group))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -367,7 +388,7 @@ func (s *Server) forceRepublish(ctx context.Context, group string) {
 // this group and, if different, bumps the version and pushes it to every
 // currently-connected subscriber for that group.
 func (s *Server) publishIfChanged(group string, snap pool.Snapshot) {
-	next := snapshotToBackendSet(group, snap, s.overrides.GroupOverrides(group), s.algorithms.Get(group), s.sticky.Get(group))
+	next := snapshotToBackendSet(group, snap, s.overrides.GroupOverrides(group), s.algorithms.Get(group), s.sticky.Get(group), s.rateLimits.Get(group))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -698,6 +719,7 @@ type GroupState struct {
 	SubscriberCount int
 	Algorithm       Algorithm
 	Sticky          StickyConfig
+	RateLimit       RateLimitConfig
 }
 
 // Snapshot returns a read-only view of every group's current backend set,
@@ -762,6 +784,7 @@ func (s *Server) Snapshot(ctx context.Context) []GroupState {
 			SubscriberCount: subCount,
 			Algorithm:       s.algorithms.Get(group),
 			Sticky:          s.sticky.Get(group),
+			RateLimit:       s.rateLimits.Get(group),
 		})
 	}
 	return states
@@ -816,7 +839,7 @@ func (s *Server) FleetSnapshot() []InstanceState {
 // group's currently selected load-balancing algorithm and sticky-session
 // configuration are included so data planes apply both without a
 // separate round-trip.
-func snapshotToBackendSet(group string, snap pool.Snapshot, overrides map[string]Override, algorithm Algorithm, sticky StickyConfig) *pb.BackendSet {
+func snapshotToBackendSet(group string, snap pool.Snapshot, overrides map[string]Override, algorithm Algorithm, sticky StickyConfig, rateLimit RateLimitConfig) *pb.BackendSet {
 	backends := make([]*pb.Backend, 0, len(snap.Backends))
 	for _, b := range snap.Backends {
 		ov, hasOverride := overrides[b.Address]
@@ -830,6 +853,19 @@ func snapshotToBackendSet(group string, snap pool.Snapshot, overrides map[string
 		}
 		backends = append(backends, &pb.Backend{Address: b.Address, Weight: weight})
 	}
+	var rps float64
+	var burst int32
+	if rateLimit.Enabled {
+		rps = rateLimit.effectiveRPS()
+		b := rateLimit.effectiveBurst()
+		// Clamp to int32 range for the wire type — a burst larger than
+		// this is nonsensical anyway and would only come from a corrupt
+		// config file.
+		if b > math.MaxInt32 {
+			b = math.MaxInt32
+		}
+		burst = int32(b)
+	}
 	return &pb.BackendSet{
 		Group:            group,
 		Backends:         backends,
@@ -837,6 +873,8 @@ func snapshotToBackendSet(group string, snap pool.Snapshot, overrides map[string
 		Sticky:           sticky.Enabled,
 		StickyCookieName: sticky.effectiveCookieName(),
 		StickyTtlSeconds: int64(sticky.effectiveTTL().Seconds()),
+		RateLimitRps:     rps,
+		RateLimitBurst:   burst,
 	}
 }
 

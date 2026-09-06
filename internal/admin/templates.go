@@ -422,6 +422,23 @@ const templatesSource = `
               </label>
               <button type="submit" class="btn">Save</button>
             </form>
+            <form method="post" action="/ratelimit" class="sticky-row">
+              <input type="hidden" name="csrf_token" value="{{$csrf}}">
+              <input type="hidden" name="group" value="{{$group}}">
+              <label class="sticky-toggle">
+                <input type="checkbox" name="enabled" {{if .RateLimit.Enabled}}checked{{end}}>
+                <span>Rate limit (per client)</span>
+              </label>
+              <label class="sticky-field">
+                <span>req/s</span>
+                <input type="number" name="rps" value="{{.RateLimit.RPSDisplay}}" min="0" step="0.1" placeholder="10" class="sticky-input sticky-input--narrow">
+              </label>
+              <label class="sticky-field">
+                <span>burst</span>
+                <input type="number" name="burst" value="{{.RateLimit.BurstDisplay}}" min="1" placeholder="10" class="sticky-input sticky-input--narrow">
+              </label>
+              <button type="submit" class="btn">Save</button>
+            </form>
             {{if .Backends}}
             <table class="table">
               <tr><th>Address</th><th>Weight</th><th>Health</th><th>Actions</th></tr>

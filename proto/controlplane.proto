@@ -81,6 +81,15 @@ message BackendSet {
   // it's used for. Only meaningful when sticky is true; the data plane
   // applies a default if unset/zero.
   int64 sticky_ttl_seconds = 7;
+  // Per-client request rate limit for this group, in requests per second.
+  // 0 (default) disables rate limiting. The data plane enforces this with
+  // a token bucket keyed on client IP; a client exceeding the rate gets
+  // HTTP 429. L7 (http) mode only.
+  double rate_limit_rps = 8;
+  // Maximum burst size (token-bucket depth) allowed above the steady
+  // rate_limit_rps. 0 lets the data plane apply a sensible default
+  // (equal to the rate) when rate limiting is enabled.
+  int32 rate_limit_burst = 9;
 }
 
 message BackendHealth {

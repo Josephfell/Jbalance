@@ -148,8 +148,9 @@ cleared by a control plane restart.
 
 **Audit log.** Available at **Audit Log** in the nav bar — records login
 successes/failures, rate-limit lockouts, password changes, password resets
-(via `-admin-force-reset-password`), logouts, pool overrides, and algorithm
-changes, each with a timestamp and client IP. Kept as a bounded (last 500
+(via `-admin-force-reset-password`), logouts, pool overrides, algorithm
+changes, and sticky-session / request-rate-limit configuration changes,
+each with a timestamp and client IP. Kept as a bounded (last 500
 events) local JSON file — this is meant for "did someone lock themselves
 out this morning" debugging, not a permanent compliance record.
 
@@ -315,6 +316,31 @@ per-group settings.
 *backend group*, not per route. If a route table sends different
 requests from the same client to different groups, each group's affinity
 (if enabled) is tracked independently via its own cookie.
+
+## Rate limiting
+
+Each group can enforce a **per-client request rate limit**, configured
+from the dashboard like the load-balancing algorithm and sticky-session
+settings (not a startup flag). Enable it per group and set:
+
+- **req/s** — the sustained per-client rate (requests per second).
+- **burst** — the token-bucket depth: how many requests a client may make
+  in a burst above the sustained rate before being limited. Defaults to
+  the rate (a one-second burst) when left blank.
+
+Each data plane keeps an independent token bucket per client IP within
+each group; a client that outpaces its bucket gets **HTTP 429**. The limit
+is pushed to every subscribed data plane as part of the group's
+`BackendSet` — no separate round trip, no data plane restart. Stored in a
+local JSON file (`-admin-ratelimit-path`, default
+`/var/lib/go-loadbalancer/ratelimit.json`), same pattern as the other
+per-group settings.
+
+Rate limiting applies to **L7 (`http`) mode only** — it's request-scoped,
+and an L4/`tcp` proxy has no request boundaries within a connection. A
+client IP behind a trusted proxy is taken from the left-most
+`X-Forwarded-For` entry when present, otherwise the direct connection
+address.
 
 ## L4 (raw TCP) mode
 
