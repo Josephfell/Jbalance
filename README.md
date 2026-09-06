@@ -355,7 +355,53 @@ modes read from the same `BackendList`.
 
 `-http-tls-cert`/`-http-tls-key` (despite the flag name, shared with
 `tcp` mode) terminate TLS at the listener in either mode; leave them
-unset to accept plaintext TCP.
+unset to accept plaintext TCP. See [TLS termination](#tls-termination-sni--hot-reload)
+below for serving multiple hostnames (SNI), hot-reloading a rotated
+certificate without a restart, and requiring client certificates (mutual
+TLS).
+
+## TLS termination (SNI + hot-reload)
+
+A data plane instance can terminate TLS at its own listener in both
+`http` and `tcp` modes. The simplest form is a single certificate:
+
+```bash
+go run ./cmd/dataplane -http-tls-cert=/certs/web.crt -http-tls-key=/certs/web.key
+```
+
+Beyond that single pair, three production capabilities are available:
+
+- **SNI (multiple hostnames on one listener).** Pass additional
+  `certfile:keyfile` pairs via `-http-tls-certs`
+  (`LB_HTTP_TLS_CERTS`), comma-separated. On each connection the right
+  certificate is chosen by matching the client's requested server name
+  against each certificate's DNS names (wildcard SANs like
+  `*.example.com` are honoured). A client that sends no SNI, or an
+  unrecognised name, gets the first configured certificate as a fallback.
+
+  ```bash
+  go run ./cmd/dataplane \
+    -http-tls-cert=/certs/web.crt -http-tls-key=/certs/web.key \
+    -http-tls-certs=/certs/api.crt:/certs/api.key,/certs/admin.crt:/certs/admin.key
+  ```
+
+- **Hot-reload (rotate a cert without a restart).** Set
+  `-http-tls-reload-interval` (`LB_HTTP_TLS_RELOAD_INTERVAL`) to poll the
+  certificate files for changes and reload them in place — so a renewed
+  certificate is picked up live. A `SIGHUP` to the process forces an
+  immediate reload regardless of the interval. Reloads are **atomic and
+  fail-safe**: if a reload can't parse (a half-written file mid-rotation,
+  say), the previously-loaded certificates keep serving rather than the
+  listener breaking.
+
+- **Mutual TLS (require client certs).** Set `-http-tls-client-ca`
+  (`LB_HTTP_TLS_CLIENT_CA`) to a CA certificate to require and verify
+  client certificates against it. This is distinct from the control-plane
+  mTLS (`-control-plane-tls-*`), which secures the data-plane↔control-plane
+  gRPC link rather than real client traffic.
+
+Like the other listener settings, TLS is a per-instance startup
+configuration (flags/env), not admin-UI runtime state.
 
 ## Health checking
 

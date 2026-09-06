@@ -63,6 +63,9 @@ func main() {
 
 	httpTLSCert := flag.String("http-tls-cert", envflag.String("LB_HTTP_TLS_CERT", ""), "path to a TLS certificate for the data plane's HTTP listener; if unset, the listener runs in plaintext HTTP [env: LB_HTTP_TLS_CERT]")
 	httpTLSKey := flag.String("http-tls-key", envflag.String("LB_HTTP_TLS_KEY", ""), "path to the TLS private key matching -http-tls-cert [env: LB_HTTP_TLS_KEY]")
+	httpTLSCerts := flag.String("http-tls-certs", envflag.String("LB_HTTP_TLS_CERTS", ""), "comma-separated list of additional certfile:keyfile pairs for SNI (serve multiple hostnames on one listener); combined with -http-tls-cert/-http-tls-key if those are also set [env: LB_HTTP_TLS_CERTS]")
+	httpTLSReloadInterval := flag.Duration("http-tls-reload-interval", envflag.Duration("LB_HTTP_TLS_RELOAD_INTERVAL", 0), "how often to check the TLS cert/key files for changes and hot-reload them without a restart; 0 disables polling (SIGHUP still forces a reload) [env: LB_HTTP_TLS_RELOAD_INTERVAL]")
+	httpTLSClientCA := flag.String("http-tls-client-ca", envflag.String("LB_HTTP_TLS_CLIENT_CA", ""), "CA cert to require and verify client certificates against on the data plane's HTTP/TCP listener (mutual TLS); leave empty for server-only TLS [env: LB_HTTP_TLS_CLIENT_CA]")
 
 	healthReportInterval := flag.Duration("health-report-interval", envflag.Duration("LB_HEALTH_REPORT_INTERVAL", 10*time.Second), "how often to report backend health status back to the control plane, for display in the admin web UI [env: LB_HEALTH_REPORT_INTERVAL]")
 
@@ -113,6 +116,53 @@ func main() {
 		log.Fatalf("dataplane: unknown -health-check-mode %q (must be 'tcp' or 'http')", *healthCheckMode)
 	}
 
+	// Assemble the TLS certificate reloader (SNI + hot-reload) from the
+	// single-cert flags and/or the multi-cert SNI list. A nil reloader
+	// means plaintext.
+	var certReloader *tlsutil.CertReloader
+	{
+		var pairs []tlsutil.CertPair
+		if *httpTLSCert != "" && *httpTLSKey != "" {
+			pairs = append(pairs, tlsutil.CertPair{CertFile: *httpTLSCert, KeyFile: *httpTLSKey})
+		}
+		extra, err := tlsutil.ParseCertPairs(*httpTLSCerts)
+		if err != nil {
+			log.Fatalf("dataplane: %v", err)
+		}
+		pairs = append(pairs, extra...)
+		if len(pairs) > 0 {
+			certReloader, err = tlsutil.NewCertReloader(pairs)
+			if err != nil {
+				log.Fatalf("dataplane: %v", err)
+			}
+			log.Printf("dataplane: TLS listener enabled with %d certificate(s): %v", len(pairs), certReloader.CertNames())
+			// Hot-reload on file change (if a poll interval is set) and on
+			// SIGHUP, so a rotated cert is picked up without a restart.
+			done := make(chan struct{})
+			go func() {
+				<-ctx.Done()
+				close(done)
+			}()
+			go certReloader.Watch(done, *httpTLSReloadInterval, nil)
+			go func() {
+				hup := make(chan os.Signal, 1)
+				signal.Notify(hup, syscall.SIGHUP)
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-hup:
+						if err := certReloader.Reload(); err != nil {
+							log.Printf("dataplane: SIGHUP cert reload failed, keeping previous certificates: %v", err)
+						} else {
+							log.Printf("dataplane: SIGHUP reloaded TLS certificates: %v", certReloader.CertNames())
+						}
+					}
+				}
+			}()
+		}
+	}
+
 	// groups owns one BackendList (+ Subscriber, HealthChecker,
 	// HealthReporter) per backend group this instance ends up proxying
 	// to. -group's subscription is started eagerly below so an instance
@@ -154,7 +204,7 @@ func main() {
 	}
 
 	if *protocol == "tcp" {
-		runTCP(ctx, id, *group, *listenAddr, *controlPlaneAddr, defaultBackends, metrics, *httpTLSCert, *httpTLSKey, *tcpDialTimeout, *shutdownGrace)
+		runTCP(ctx, id, *group, *listenAddr, *controlPlaneAddr, defaultBackends, metrics, certReloader, *httpTLSClientCA, *tcpDialTimeout, *shutdownGrace)
 		return
 	}
 
@@ -214,9 +264,19 @@ func main() {
 	log.Printf("dataplane: instance %q serving group %q on %s, control plane at %s", id, *group, *listenAddr, *controlPlaneAddr)
 
 	var serveErr error
-	if *httpTLSCert != "" {
-		log.Println("dataplane: HTTP listener TLS enabled")
-		serveErr = server.ListenAndServeTLS(*httpTLSCert, *httpTLSKey)
+	if certReloader != nil {
+		tlsCfg, err := certReloader.TLSConfig(*httpTLSClientCA)
+		if err != nil {
+			log.Fatalf("dataplane: %v", err)
+		}
+		server.TLSConfig = tlsCfg
+		ln, err := net.Listen("tcp", *listenAddr)
+		if err != nil {
+			log.Fatalf("dataplane: failed to listen on %s: %v", *listenAddr, err)
+		}
+		log.Println("dataplane: HTTP listener TLS enabled (SNI + hot-reload)")
+		// Empty cert/key args: the certificates come from TLSConfig.GetCertificate.
+		serveErr = server.ServeTLS(ln, "", "")
 	} else {
 		log.Println("dataplane: WARNING HTTP listener running without TLS — use -http-tls-cert/-http-tls-key outside of local development.")
 		serveErr = server.ListenAndServe()
@@ -231,16 +291,16 @@ func main() {
 // bytes it forwards) and no debug/healthz HTTP endpoints — group is the
 // only backend group this listener will ever proxy to, for its entire
 // lifetime, exactly like an L7 data plane instance before routing existed.
-func runTCP(ctx context.Context, id, group, listenAddr, controlPlaneAddr string, backends *dataplane.BackendList, metrics *dataplane.Metrics, tlsCert, tlsKey string, dialTimeout, shutdownGrace time.Duration) {
+func runTCP(ctx context.Context, id, group, listenAddr, controlPlaneAddr string, backends *dataplane.BackendList, metrics *dataplane.Metrics, certReloader *tlsutil.CertReloader, clientCA string, dialTimeout, shutdownGrace time.Duration) {
 	var ln net.Listener
 	var err error
-	if tlsCert != "" {
-		cert, certErr := tls.LoadX509KeyPair(tlsCert, tlsKey)
-		if certErr != nil {
-			log.Fatalf("dataplane: failed to load TCP listener TLS cert/key: %v", certErr)
+	if certReloader != nil {
+		tlsCfg, cfgErr := certReloader.TLSConfig(clientCA)
+		if cfgErr != nil {
+			log.Fatalf("dataplane: %v", cfgErr)
 		}
-		log.Println("dataplane: TCP listener TLS enabled")
-		ln, err = tls.Listen("tcp", listenAddr, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+		log.Println("dataplane: TCP listener TLS enabled (SNI + hot-reload)")
+		ln, err = tls.Listen("tcp", listenAddr, tlsCfg)
 	} else {
 		log.Println("dataplane: WARNING TCP listener running without TLS — use -http-tls-cert/-http-tls-key outside of local development.")
 		ln, err = net.Listen("tcp", listenAddr)
