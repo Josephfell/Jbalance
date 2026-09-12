@@ -717,6 +717,57 @@ that request's `X-Request-Id` (see request tracing below) into every
 application log line it emits, so an error logged deep in the proxy path
 can be correlated to the exact request that triggered it.
 
+## Startup configuration validation
+
+Both binaries validate their entire `LB_*` configuration **once, at
+startup, before anything else happens** — before a listener is opened, a
+provider is built, a credential is loaded, or a background goroutine is
+started. An invalid setting causes the process to print a clear error and
+**exit non-zero immediately**, instead of surfacing later as an obscure
+runtime failure (a listener that never binds, a TLS handshake that fails on
+the first connection, a negative timeout that silently means "no timeout").
+
+The validator reports **every** problem it finds in one pass, not just the
+first, so an operator fixing a bad config sees the whole list at once
+rather than restarting repeatedly:
+
+```
+$ LB_PROTOCOL=udp LB_LOG_LEVEL=trace LB_HEALTH_CHECK_TIMEOUT=-1s dataplane
+ERROR startup configuration invalid component=dataplane error="invalid configuration (3 problem(s)):
+  - -protocol (LB_PROTOCOL) "udp" is invalid (must be one of: http, tcp)
+  - -log-level (LB_LOG_LEVEL) "trace" is invalid (must be one of: debug, info, warn, error)
+  - -health-check-timeout (LB_HEALTH_CHECK_TIMEOUT) must be positive (got -1s)"
+# exit status 1
+```
+
+What is checked:
+
+- **Enumerations** — `-protocol`, `-health-check-mode`, `-health-check-scheme`,
+  `-backend-protocol`, `-access-log-format`, `-log-level`, `-log-format`,
+  and `-provider` must each be one of their documented values.
+- **Addresses** — every listen address (`-listen-addr`, `-metrics-addr`,
+  `-ops-addr`, `-grpc-addr`, `-admin-addr`) and dial target
+  (`-control-plane-addr`) must be a well-formed `host:port` with a valid
+  port. (`-ops-addr` may be empty to disable the ops listener.)
+- **Timeouts and counts** — durations that must be positive (health-check
+  interval/timeout, connect and TCP dial timeouts, reconcile interval)
+  are rejected when zero or negative; documented "disabled" sentinels
+  (`-proxy-response-timeout=0`, `-shutdown-grace=0`, `-proxy-max-retries=0`)
+  are still accepted. Thresholds, percentages, and ports are range-checked.
+- **TLS material** — cert/key flags must be set together; a client-CA
+  (mTLS) requires a server certificate; and every configured cert/key/CA
+  file must exist **and actually load** — the same load the process would
+  otherwise attempt on its first connection, done up front instead.
+- **Provider requirements** — the `azure-vmss` provider requires a
+  subscription ID, resource group, and at least one group spec; the
+  `kubernetes` provider requires at least one group spec.
+- **Mutually-exclusive / no-op flags** — e.g. control-plane client-TLS
+  material passed without `-control-plane-tls` (which would silently do
+  nothing) is rejected rather than ignored.
+
+No new flags are introduced by this validation — it only tightens how the
+existing configuration is checked.
+
 ## Access logging and request tracing
 
 Metrics tell you how much traffic there is and how fast it is in

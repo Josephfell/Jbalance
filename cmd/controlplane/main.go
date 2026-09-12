@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	"github.com/Josephfell/Jbalance/internal/admin"
+	"github.com/Josephfell/Jbalance/internal/config"
 	"github.com/Josephfell/Jbalance/internal/controlplane"
 	"github.com/Josephfell/Jbalance/internal/envflag"
 	"github.com/Josephfell/Jbalance/internal/logging"
@@ -84,6 +85,41 @@ func main() {
 	logFormat := flag.String("log-format", envflag.String("LB_LOG_FORMAT", "text"), "structured log output format: 'json' (for log aggregation) or 'text' (human-readable, default) [env: LB_LOG_FORMAT]")
 
 	flag.Parse()
+
+	// Fail-fast: validate the whole configuration up front, before the
+	// provider is built, any listener is opened, or the admin store is
+	// touched. One clear error listing every problem, non-zero exit.
+	if err := config.ValidateControlPlane(config.ControlPlaneConfig{
+		GRPCAddr:          *grpcAddr,
+		AdminAddr:         *adminAddr,
+		AdminDisable:      *adminDisable,
+		ReconcileInterval: *reconcileInterval,
+
+		TLSCert:     *tlsCertFile,
+		TLSKey:      *tlsKeyFile,
+		TLSClientCA: *tlsClientCAFile,
+
+		Provider: *providerKind,
+
+		FakeBasePort:    *fakeBasePort,
+		ScalingInterval: *scalingInterval,
+		SimulateScaling: *simulateScaling,
+
+		AzureSubscriptionID: *azureSubscriptionID,
+		AzureResourceGroup:  *azureResourceGroup,
+		AzureVMSSGroups:     *azureVMSSGroups,
+
+		K8sGroups:     *k8sGroups,
+		K8sKubeconfig: *k8sKubeconfig,
+
+		AdminTLSCert: *adminTLSCert,
+		AdminTLSKey:  *adminTLSKey,
+
+		LogLevel:  *logLevel,
+		LogFormat: *logFormat,
+	}); err != nil {
+		fatal("startup configuration invalid", "error", err)
+	}
 
 	// Install the process-wide structured logger before any log line is
 	// emitted, so every component (and slog-aware libraries) share one

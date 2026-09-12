@@ -31,6 +31,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/Josephfell/Jbalance/internal/config"
 	"github.com/Josephfell/Jbalance/internal/dataplane"
 	"github.com/Josephfell/Jbalance/internal/envflag"
 	"github.com/Josephfell/Jbalance/internal/logging"
@@ -109,6 +110,65 @@ func main() {
 	logFormat := flag.String("log-format", envflag.String("LB_LOG_FORMAT", "text"), "structured log output format: 'json' (for log aggregation) or 'text' (human-readable, default) [env: LB_LOG_FORMAT]")
 	flag.Parse()
 
+	// Fail-fast: validate the whole configuration up front, before any
+	// listener is opened, any goroutine started, or any credential loaded.
+	// An invalid setting produces one clear, complete error listing every
+	// problem, and a non-zero exit — instead of surfacing later as an
+	// obscure runtime failure. Note this runs before logging.Setup, so a
+	// bad -log-level/-log-format is itself caught here; the message goes
+	// to stderr via the default logger, which is fine for a startup abort.
+	if err := config.ValidateDataPlane(config.DataPlaneConfig{
+		Protocol:         *protocol,
+		ListenAddr:       *listenAddr,
+		ControlPlaneAddr: *controlPlaneAddr,
+		Group:            *group,
+		MetricsAddr:      *metricsAddr,
+		MetricsEnabled:   *metricsEnabled,
+		MetricsDisable:   *metricsDisable,
+		OpsAddr:          *opsAddr,
+
+		HealthCheckMode:         *healthCheckMode,
+		HealthCheckScheme:       *healthCheckScheme,
+		HealthCheckInterval:     *healthCheckInterval,
+		HealthCheckTimeout:      *healthCheckTimeout,
+		HealthCheckExpectStatus: *healthCheckExpectStatus,
+		UnhealthyThreshold:      *unhealthyThreshold,
+		HealthyThreshold:        *healthyThreshold,
+
+		BackendProtocol: *backendProtocol,
+		AccessLog:       *accessLog,
+		AccessLogFormat: *accessLogFormat,
+
+		ProxyConnectTimeout:  *proxyConnectTimeout,
+		ProxyResponseTimeout: *proxyResponseTimeout,
+		ProxyMaxRetries:      *proxyMaxRetries,
+		ProxyRetryBackoff:    *proxyRetryBackoff,
+		TCPDialTimeout:       *tcpDialTimeout,
+		ShutdownGrace:        *shutdownGrace,
+
+		OutlierDetection:        *outlierDetection,
+		OutlierConsecutiveError: *outlierConsecutiveErrors,
+		OutlierEjectDuration:    *outlierEjectDuration,
+		OutlierMaxEjectDuration: *outlierMaxEjectDuration,
+		OutlierMaxEjectPercent:  *outlierMaxEjectPercent,
+
+		CPTLSEnable:     *cpTLSEnable,
+		CPTLSCACert:     *cpTLSCACert,
+		CPTLSClientCert: *cpTLSClientCert,
+		CPTLSClientKey:  *cpTLSClientKey,
+
+		HTTPTLSCert:           *httpTLSCert,
+		HTTPTLSKey:            *httpTLSKey,
+		HTTPTLSCerts:          *httpTLSCerts,
+		HTTPTLSClientCA:       *httpTLSClientCA,
+		HTTPTLSReloadInterval: *httpTLSReloadInterval,
+
+		LogLevel:  *logLevel,
+		LogFormat: *logFormat,
+	}); err != nil {
+		fatal("startup configuration invalid", "error", err)
+	}
+
 	// Install the process-wide structured logger before any log line is
 	// emitted, so every component (and slog-aware libraries) share one
 	// level and format.
@@ -149,6 +209,10 @@ func main() {
 	if *backendProtocol != "http1" && *backendProtocol != "h2c" {
 		fatal("unknown -backend-protocol (must be 'http1' or 'h2c')", "protocol", *backendProtocol)
 	}
+
+	// -protocol, -health-check-mode and -backend-protocol are validated up
+	// front by config.ValidateDataPlane (above), so by the time we reach
+	// here they are known-good.
 
 	// Assemble the TLS certificate reloader (SNI + hot-reload) from the
 	// single-cert flags and/or the multi-cert SNI list. A nil reloader
