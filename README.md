@@ -589,6 +589,44 @@ accepting new work and then waits up to `LB_SHUTDOWN_GRACE` (default 5s)
 for in-flight requests (L7) or connections (L4) to complete before forcing
 them closed.
 
+## Resource limits and panic recovery
+
+L7 (HTTP) mode hardens the request path against a buggy backend request, a
+runaway client, and a latent code-path bug — none of which should be able
+to take the whole instance down or exhaust its memory.
+
+**Panic recovery.** Every L7 request passes through a recovery middleware:
+if the handler chain panics (a bug in the proxy, a middleware, or the
+stdlib), the panic is **recovered**, logged at `error` with the request's
+`request_id`, method, path and a stack trace, counted in
+`jbalance_http_panics_total`, and turned into a `500` — the process keeps
+serving every other request instead of crashing. (The stdlib's deliberate
+`http.ErrAbortHandler` stream-abort sentinel is intentionally *not*
+swallowed.) A non-zero `jbalance_http_panics_total` is always worth
+alerting on: it means real requests are hitting a bug.
+
+**Resource limits** (all default to off/unlimited except the header caps):
+
+- `LB_MAX_CONNS` (default `0` = unlimited) — maximum requests served
+  **concurrently**. A request arriving while the limit is saturated is
+  rejected **immediately** with `503` and `Retry-After: 1` rather than
+  queued, so a connection flood cannot grow the process's memory without
+  bound (each queued request otherwise pins a goroutine, its buffers, and a
+  backend connection).
+- `LB_MAX_HEADER_BYTES` (default `1048576` = 1 MB) — maximum size of the
+  request headers the server will read (`http.Server.MaxHeaderBytes`).
+- `LB_MAX_BODY_BYTES` (default `0` = unlimited) — maximum request body
+  size in bytes; a larger body is rejected before it is streamed to (and
+  buffered by) a backend.
+- `LB_READ_HEADER_TIMEOUT` (default 10s) — how long the server waits to
+  read a request's headers before timing out the connection
+  (`http.Server.ReadHeaderTimeout`); guards against slowloris-style
+  header-drip attacks that hold a connection open by trickling headers.
+
+These act only on the L7 traffic listener. The metrics (`:9100`) and
+ops/health (`:9101`) listeners keep their own fixed 10s header-read
+timeout and are unaffected.
+
 ## Monitoring and metrics
 
 Every data plane instance exposes traffic metrics two ways at once, kept
@@ -607,6 +645,9 @@ exposed, all labelled by `group`:
 - `jbalance_http_retries_total{group}` — counter, retry attempts against a
   different backend after a connection-level failure (excludes the initial
   attempt), L7 mode only
+- `jbalance_http_panics_total{group}` — counter, panics recovered by the L7
+  panic-recovery middleware (each turned into a 500 rather than crashing the
+  process), L7 mode only; a non-zero value is always worth alerting on
 - `jbalance_tcp_connections_total{group}` — counter, L4 mode only
 - `jbalance_tcp_bytes_total{group,direction}` — counter, `direction` is `in`/`out`, L4 mode only
 - `jbalance_tcp_active_connections{group}` — gauge, L4 mode only
@@ -750,10 +791,12 @@ What is checked:
   (`-control-plane-addr`) must be a well-formed `host:port` with a valid
   port. (`-ops-addr` may be empty to disable the ops listener.)
 - **Timeouts and counts** — durations that must be positive (health-check
-  interval/timeout, connect and TCP dial timeouts, reconcile interval)
-  are rejected when zero or negative; documented "disabled" sentinels
-  (`-proxy-response-timeout=0`, `-shutdown-grace=0`, `-proxy-max-retries=0`)
-  are still accepted. Thresholds, percentages, and ports are range-checked.
+  interval/timeout, connect and TCP dial timeouts, reconcile interval,
+  `-read-header-timeout`) are rejected when zero or negative; documented
+  "disabled" sentinels (`-proxy-response-timeout=0`, `-shutdown-grace=0`,
+  `-proxy-max-retries=0`, `-max-conns=0`, `-max-body-bytes=0`) are still
+  accepted. `-max-header-bytes` must be positive. Thresholds, percentages,
+  and ports are range-checked.
 - **TLS material** — cert/key flags must be set together; a client-CA
   (mTLS) requires a server certificate; and every configured cert/key/CA
   file must exist **and actually load** — the same load the process would

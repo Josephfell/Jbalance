@@ -108,6 +108,11 @@ func main() {
 
 	logLevel := flag.String("log-level", envflag.String("LB_LOG_LEVEL", "info"), "minimum log level: debug, info, warn, or error [env: LB_LOG_LEVEL]")
 	logFormat := flag.String("log-format", envflag.String("LB_LOG_FORMAT", "text"), "structured log output format: 'json' (for log aggregation) or 'text' (human-readable, default) [env: LB_LOG_FORMAT]")
+
+	maxConns := flag.Int("max-conns", envflag.Int("LB_MAX_CONNS", 0), "(http mode) maximum number of requests served concurrently; a request arriving while the limit is saturated is rejected with 503 rather than queued, which bounds process memory under a connection flood. 0 disables the limit [env: LB_MAX_CONNS]")
+	maxHeaderBytes := flag.Int("max-header-bytes", envflag.Int("LB_MAX_HEADER_BYTES", 1<<20), "(http mode) maximum size in bytes of request headers the server will read (http.Server.MaxHeaderBytes); must be positive. Default 1MB [env: LB_MAX_HEADER_BYTES]")
+	maxBodyBytes := flag.Int64("max-body-bytes", envflag.Int64("LB_MAX_BODY_BYTES", 0), "(http mode) maximum request body size in bytes; a larger body is rejected before being forwarded to a backend. 0 disables the limit [env: LB_MAX_BODY_BYTES]")
+	readHeaderTimeout := flag.Duration("read-header-timeout", envflag.Duration("LB_READ_HEADER_TIMEOUT", 10*time.Second), "(http mode) how long the server waits to read a request's headers before timing out the connection (http.Server.ReadHeaderTimeout); guards against slowloris-style header-drip. Must be positive [env: LB_READ_HEADER_TIMEOUT]")
 	flag.Parse()
 
 	// Fail-fast: validate the whole configuration up front, before any
@@ -145,6 +150,11 @@ func main() {
 		ProxyRetryBackoff:    *proxyRetryBackoff,
 		TCPDialTimeout:       *tcpDialTimeout,
 		ShutdownGrace:        *shutdownGrace,
+
+		MaxConns:          *maxConns,
+		MaxHeaderBytes:    *maxHeaderBytes,
+		MaxBodyBytes:      *maxBodyBytes,
+		ReadHeaderTimeout: *readHeaderTimeout,
 
 		OutlierDetection:        *outlierDetection,
 		OutlierConsecutiveError: *outlierConsecutiveErrors,
@@ -347,7 +357,26 @@ func main() {
 		Enabled: *accessLog,
 		Format:  dataplane.AccessLogFormat(*accessLogFormat),
 	}
-	mux.Handle("/", dataplane.AccessLogMiddleware(proxy.Handler(), accessLogCfg, nil, logger))
+	// Handler chain, outermost first:
+	//   AccessLog (assigns request-id + context logger)
+	//     -> Recovery (catches panics, logs with request-id, 500s)
+	//       -> MaxConns (bounds concurrency, 503s when saturated)
+	//         -> MaxBody (caps request body size)
+	//           -> proxy
+	// Recovery sits INSIDE AccessLog so a recovered 500 is still access-logged
+	// and the panic log line carries the request-id; it sits OUTSIDE the
+	// resource-limit middlewares so a panic in either is also caught.
+	handler := proxy.Handler()
+	handler = dataplane.MaxBodyMiddleware(handler, *maxBodyBytes)
+	handler = dataplane.MaxConnsMiddleware(handler, *maxConns)
+	handler = dataplane.RecoveryMiddleware(handler, *group, metrics)
+	mux.Handle("/", dataplane.AccessLogMiddleware(handler, accessLogCfg, nil, logger))
+	if *maxConns > 0 {
+		slog.Info("max concurrent connections limit enabled", "component", "dataplane", "max_conns", *maxConns)
+	}
+	if *maxBodyBytes > 0 {
+		slog.Info("max request body size limit enabled", "component", "dataplane", "max_body_bytes", *maxBodyBytes)
+	}
 	if *accessLog {
 		slog.Info("access logging enabled", "component", "dataplane", "format", *accessLogFormat)
 	}
@@ -373,7 +402,8 @@ func main() {
 	server := &http.Server{
 		Addr:              *listenAddr,
 		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: *readHeaderTimeout,
+		MaxHeaderBytes:    *maxHeaderBytes,
 	}
 	if *backendProtocol == "h2c" {
 		// Serve unencrypted HTTP/2 (h2c) on the same listener, so a

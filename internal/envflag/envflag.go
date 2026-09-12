@@ -47,6 +47,21 @@ func Int(key string, fallback int) int {
 	return parsed
 }
 
+// Int64 returns the parsed 64-bit integer value of the given environment
+// variable, or fallback if it's unset, empty, or not a valid integer. Used
+// for byte-size limits that can legitimately exceed the 32-bit range.
+func Int64(key string, fallback int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
 // Duration returns the parsed time.Duration value of the given environment
 // variable (e.g. "5s", "2m"), or fallback if it's unset, empty, or not a
 // valid duration.

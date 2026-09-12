@@ -208,6 +208,11 @@ type DataPlaneConfig struct {
 	TCPDialTimeout       time.Duration
 	ShutdownGrace        time.Duration
 
+	MaxConns          int
+	MaxHeaderBytes    int
+	MaxBodyBytes      int64
+	ReadHeaderTimeout time.Duration
+
 	OutlierDetection        bool
 	OutlierConsecutiveError int
 	OutlierEjectDuration    time.Duration
@@ -272,6 +277,17 @@ func ValidateDataPlane(c DataPlaneConfig) error {
 	p.checkNonNegative("-proxy-retry-backoff (LB_PROXY_RETRY_BACKOFF)", c.ProxyRetryBackoff)
 	p.checkPositive("-tcp-dial-timeout (LB_TCP_DIAL_TIMEOUT)", c.TCPDialTimeout)
 	p.checkNonNegative("-shutdown-grace (LB_SHUTDOWN_GRACE)", c.ShutdownGrace)
+
+	// Resource limits (http mode). 0 is the documented "unlimited/disabled"
+	// sentinel for max-conns and max-body-bytes, so only reject negatives;
+	// max-header-bytes and read-header-timeout must be strictly positive
+	// (a zero/negative header limit or read timeout is never intended).
+	p.checkNonNegativeInt("-max-conns (LB_MAX_CONNS)", c.MaxConns)
+	p.checkPositiveInt("-max-header-bytes (LB_MAX_HEADER_BYTES)", c.MaxHeaderBytes)
+	if c.MaxBodyBytes < 0 {
+		p.addf("-max-body-bytes (LB_MAX_BODY_BYTES) must not be negative (got %d)", c.MaxBodyBytes)
+	}
+	p.checkPositive("-read-header-timeout (LB_READ_HEADER_TIMEOUT)", c.ReadHeaderTimeout)
 
 	if c.OutlierDetection {
 		p.checkPositiveInt("-outlier-consecutive-errors (LB_OUTLIER_CONSECUTIVE_ERRORS)", c.OutlierConsecutiveError)
