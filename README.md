@@ -646,6 +646,50 @@ appear in either view, rather than showing misleading all-zero values —
 the same "no data yet" distinction the health-status display already
 makes.
 
+## Liveness and readiness probes
+
+Each data plane instance serves two orchestrator health probes on a
+dedicated ops listener (`-ops-addr`, default `:9101`, set via
+`LB_OPS_ADDR`) — deliberately on its own port, separate from both the
+traffic listener and the metrics listener, so a kubelet/load-balancer
+probe never competes with proxied traffic. Because it is its own HTTP
+server, the probes work in **tcp (L4) mode** too, which otherwise stands
+up no HTTP server of its own. Set `LB_OPS_ADDR=` (empty) to disable it.
+
+- `GET /healthz` — **liveness.** Always returns `200 ok` while the process
+  is running. A failing liveness probe tells the orchestrator to *restart*
+  the pod, so this reports only that the process itself is alive — never a
+  transient lack of backends, which a restart would not fix.
+- `GET /readyz` — **readiness.** Returns `200 ready` when configuration has
+  loaded *and* at least one backend is healthy across every group this
+  instance is tracking; otherwise `503 not ready: no healthy backends`. A
+  failing readiness probe pulls the instance *out* of the service's
+  endpoints (it stops receiving traffic) without restarting it, and it
+  rejoins automatically once a backend goes healthy again. The check reads
+  the live backend lists on every request — no caching.
+
+```bash
+curl http://localhost:9101/healthz   # -> 200 "ok"
+curl http://localhost:9101/readyz    # -> 200 "ready" or 503 "not ready: no healthy backends"
+```
+
+Kubernetes probe example for a data plane Pod (ops port `9101`):
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 9101
+  initialDelaySeconds: 5
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 9101
+  initialDelaySeconds: 5
+  periodSeconds: 5
+```
+
 ## Access logging and request tracing
 
 Metrics tell you how much traffic there is and how fast it is in

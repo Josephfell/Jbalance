@@ -92,6 +92,8 @@ func main() {
 	metricsEnabled := flag.Bool("metrics-enabled", envflag.Bool("LB_METRICS_ENABLED", true), "enable the Prometheus /metrics endpoint (set false, or LB_METRICS_ENABLED=false, to turn it off) [env: LB_METRICS_ENABLED]")
 	metricsDisable := flag.Bool("metrics-disable", envflag.Bool("LB_METRICS_DISABLE", false), "disable the Prometheus /metrics endpoint entirely (legacy alias for -metrics-enabled=false; if either flag disables metrics, they are off) [env: LB_METRICS_DISABLE]")
 	metricsReportInterval := flag.Duration("metrics-report-interval", envflag.Duration("LB_METRICS_REPORT_INTERVAL", 10*time.Second), "how often to push a traffic summary to the control plane, for display in the admin web UI's live charts [env: LB_METRICS_REPORT_INTERVAL]")
+
+	opsAddr := flag.String("ops-addr", envflag.String("LB_OPS_ADDR", ":9101"), "address for the ops/health listener serving liveness (/healthz) and readiness (/readyz) probes, on its own port separate from the traffic listener (so a probe never competes with proxied traffic and works in tcp mode too); set empty to disable [env: LB_OPS_ADDR]")
 	flag.Parse()
 
 	id := *instanceID
@@ -226,6 +228,19 @@ func main() {
 	} else {
 		log.Println("dataplane: metrics endpoint disabled")
 	}
+
+	// Ops/health listener: liveness (/healthz) and readiness (/readyz) on
+	// their own port, separate from the traffic listener — so a
+	// kubelet/LB probe never competes with proxied traffic, and so tcp
+	// (L4) mode gets probe endpoints even though it stands up no HTTP
+	// traffic server of its own. Liveness just proves the process is
+	// alive; readiness proves config has loaded AND at least one backend
+	// is healthy across all tracked groups (nothing to route to => not
+	// ready).
+	ready := func() bool {
+		return groups.HealthyLen() > 0
+	}
+	startOpsServer(ctx, *opsAddr, ready)
 
 	if *protocol == "tcp" {
 		runTCP(ctx, id, *group, *listenAddr, *controlPlaneAddr, defaultBackends, metrics, certReloader, *httpTLSClientCA, *tcpDialTimeout, *shutdownGrace)
@@ -399,4 +414,81 @@ func startMetricsServer(ctx context.Context, addr string, registry *prometheus.R
 			log.Printf("dataplane: metrics server error: %v", err)
 		}
 	}()
+}
+
+// startOpsServer stands up a small dedicated HTTP listener for Kubernetes
+// (or any orchestrator / external load balancer) probe endpoints, on its
+// own port separate from both the traffic listener and the metrics
+// listener:
+//
+//   - GET /healthz — liveness. Always 200 while the process is running.
+//     A failing liveness probe tells the orchestrator to RESTART the pod,
+//     so it must only report the process itself being wedged, never a
+//     transient lack of backends (which a restart would not fix).
+//   - GET /readyz — readiness. 200 when ready() is true, 503 otherwise.
+//     ready() reports whether config has loaded and at least one backend
+//     is healthy, so a failing readiness probe pulls this instance OUT of
+//     the service's endpoints (no traffic) without restarting it, and it
+//     rejoins automatically once a backend goes healthy again.
+//
+// Deliberately on its own port so a probe can never compete with proxied
+// traffic, and so tcp (L4) mode — which stands up no HTTP traffic server
+// of its own — still gets probe endpoints. Passing an empty addr disables
+// it. A bind failure is logged, not fatal: probes are an operational
+// aid, not something that should take down request proxying.
+func startOpsServer(ctx context.Context, addr string, ready func() bool) {
+	if addr == "" {
+		log.Println("dataplane: ops/health listener disabled (empty -ops-addr)")
+		return
+	}
+
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           opsMux(ready),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	go func() {
+		log.Printf("dataplane: ops/health listener on %s (/healthz liveness, /readyz readiness)", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("dataplane: ops/health server error: %v", err)
+		}
+	}()
+}
+
+// opsMux builds the handler for the ops/health listener. Split out from
+// startOpsServer so the probe behaviour can be exercised in tests without
+// binding a real port. ready reports readiness; a nil ready is treated as
+// never ready.
+func opsMux(ready func() bool) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte("ok")); err != nil {
+			log.Printf("dataplane: failed to write /healthz response: %v", err)
+		}
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if ready != nil && ready() {
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write([]byte("ready")); err != nil {
+				log.Printf("dataplane: failed to write /readyz response: %v", err)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if _, err := w.Write([]byte("not ready: no healthy backends")); err != nil {
+			log.Printf("dataplane: failed to write /readyz response: %v", err)
+		}
+	})
+	return mux
 }
