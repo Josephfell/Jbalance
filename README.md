@@ -604,18 +604,24 @@ exposed, all labelled by `group`:
   response class (`2xx`/`4xx`/`5xx`/etc), L7 mode only
 - `jbalance_http_request_duration_seconds{group}` — histogram, L7 mode only
 - `jbalance_active_connections{group}` — gauge, in-flight requests, L7 mode only
+- `jbalance_http_retries_total{group}` — counter, retry attempts against a
+  different backend after a connection-level failure (excludes the initial
+  attempt), L7 mode only
 - `jbalance_tcp_connections_total{group}` — counter, L4 mode only
 - `jbalance_tcp_bytes_total{group,direction}` — counter, `direction` is `in`/`out`, L4 mode only
 - `jbalance_tcp_active_connections{group}` — gauge, L4 mode only
-- `jbalance_backends_healthy{group}` / `jbalance_backends_total{group}` —
-  gauges, read live from the current backend list on every scrape (not
-  cached), present in both modes
+- `jbalance_backends_healthy{group}` / `jbalance_backends_total{group}` /
+  `jbalance_backends_ejected{group}` — gauges, read live from the current
+  backend list on every scrape (not cached); `ejected` is the count of
+  backends passively removed from selection by outlier detection (circuit
+  breaking). Present in both modes
 
 Point an existing Prometheus/Grafana setup at `<instance>:9100/metrics`
 on every data plane instance for full histograms, long-term retention,
 alerting rules, and whatever dashboards you'd build for any other
 service — this is the integration path for real production monitoring.
-Set `-metrics-disable` (or `LB_METRICS_DISABLE=true`) to turn the
+Set `-metrics-disable` (or `LB_METRICS_DISABLE=true`, or
+`-metrics-enabled=false` / `LB_METRICS_ENABLED=false`) to turn the
 endpoint off entirely.
 
 **Built into the admin console.** The Dashboard's **Traffic** section
