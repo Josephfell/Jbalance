@@ -31,6 +31,7 @@ type Metrics struct {
 	requestDuration *prometheus.HistogramVec
 	activeConns     *prometheus.GaugeVec
 	retriesTotal    *prometheus.CounterVec
+	panicsTotal     *prometheus.CounterVec
 	tcpBytesTotal   *prometheus.CounterVec
 	tcpConnsTotal   *prometheus.CounterVec
 	tcpActiveConns  *prometheus.GaugeVec
@@ -63,6 +64,10 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "jbalance_http_retries_total",
 			Help: "Total number of retry attempts made against a different backend after a connection-level failure, by group. Does not count the initial attempt.",
 		}, []string{"group"}),
+		panicsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "jbalance_http_panics_total",
+			Help: "Total number of panics recovered by the L7 handler's panic-recovery middleware, by group. Each one was turned into a 500 response rather than crashing the process.",
+		}, []string{"group"}),
 		tcpBytesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "jbalance_tcp_bytes_total",
 			Help: "Total bytes forwarded by the L4 TCP proxy, by group and direction.",
@@ -84,6 +89,7 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		m.requestDuration,
 		m.activeConns,
 		m.retriesTotal,
+		m.panicsTotal,
 		m.tcpBytesTotal,
 		m.tcpConnsTotal,
 		m.tcpActiveConns,
@@ -153,6 +159,15 @@ func (m *Metrics) SetActiveConnections(group string, delta int) {
 // jbalance_http_requests_total gives an operator the retry rate.
 func (m *Metrics) ObserveRetry(group string) {
 	m.retriesTotal.WithLabelValues(group).Inc()
+}
+
+// ObservePanic records one panic recovered by the L7 panic-recovery
+// middleware for group — a request whose handler chain panicked and was
+// caught, logged, and turned into a 500 rather than crashing the process.
+// A non-zero jbalance_http_panics_total is always worth alerting on: it
+// means real requests hit a bug.
+func (m *Metrics) ObservePanic(group string) {
+	m.panicsTotal.WithLabelValues(group).Inc()
 }
 
 // backendsCollector reports jbalance_backends_healthy/jbalance_backends_total
