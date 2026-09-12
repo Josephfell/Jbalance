@@ -149,3 +149,19 @@ func (m *GroupManager) Groups() []string {
 	}
 	return out
 }
+
+// HealthyLen returns the total number of currently-healthy backends
+// across every group this manager is tracking. It powers the readiness
+// probe (/readyz): an instance with zero healthy backends anywhere has
+// nothing it can proxy to, so it should not receive traffic yet. Reads
+// each group's live BackendList, so a backend coming (or going) healthy
+// is reflected on the next probe with no caching.
+func (m *GroupManager) HealthyLen() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	total := 0
+	for _, bl := range m.groups {
+		total += bl.HealthyLen()
+	}
+	return total
+}
