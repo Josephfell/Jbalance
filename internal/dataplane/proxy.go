@@ -254,6 +254,9 @@ func (p *Proxy) serveWithRetries(w http.ResponseWriter, r *http.Request, group s
 		// Connection-level failure and we still have retries left: pick a
 		// different backend after a short backoff.
 		log.Printf("dataplane: retrying request to group %q after backend %s failed (attempt %d/%d)", group, addr, attempt+1, attempts)
+		if p.metrics != nil {
+			p.metrics.ObserveRetry(group)
+		}
 		if p.cfg.RetryBackoff > 0 {
 			select {
 			case <-r.Context().Done():

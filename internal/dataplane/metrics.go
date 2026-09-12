@@ -30,6 +30,7 @@ type Metrics struct {
 	requestsTotal   *prometheus.CounterVec
 	requestDuration *prometheus.HistogramVec
 	activeConns     *prometheus.GaugeVec
+	retriesTotal    *prometheus.CounterVec
 	tcpBytesTotal   *prometheus.CounterVec
 	tcpConnsTotal   *prometheus.CounterVec
 	tcpActiveConns  *prometheus.GaugeVec
@@ -58,6 +59,10 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "jbalance_active_connections",
 			Help: "Current number of in-flight requests/connections being proxied, by group.",
 		}, []string{"group"}),
+		retriesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "jbalance_http_retries_total",
+			Help: "Total number of retry attempts made against a different backend after a connection-level failure, by group. Does not count the initial attempt.",
+		}, []string{"group"}),
 		tcpBytesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "jbalance_tcp_bytes_total",
 			Help: "Total bytes forwarded by the L4 TCP proxy, by group and direction.",
@@ -78,6 +83,7 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		m.requestsTotal,
 		m.requestDuration,
 		m.activeConns,
+		m.retriesTotal,
 		m.tcpBytesTotal,
 		m.tcpConnsTotal,
 		m.tcpActiveConns,
@@ -140,6 +146,15 @@ func (m *Metrics) SetActiveConnections(group string, delta int) {
 	m.perGroup.setActiveConns(group, delta)
 }
 
+// ObserveRetry records one retry attempt for group — i.e. a
+// connection-level failure that caused the proxy to re-select a
+// different backend and try again. Called once per retry (not counting
+// the initial attempt), so jbalance_http_retries_total divided by
+// jbalance_http_requests_total gives an operator the retry rate.
+func (m *Metrics) ObserveRetry(group string) {
+	m.retriesTotal.WithLabelValues(group).Inc()
+}
+
 // backendsCollector reports jbalance_backends_healthy/jbalance_backends_total
 // by reading live from a GroupManager at scrape time, rather than being
 // pushed to on every BackendList change — a pull-on-scrape collector
@@ -150,6 +165,7 @@ type backendsCollector struct {
 	groups  *GroupManager
 	healthy *prometheus.Desc
 	total   *prometheus.Desc
+	ejected *prometheus.Desc
 }
 
 func newBackendsCollector(groups *GroupManager) *backendsCollector {
@@ -157,12 +173,14 @@ func newBackendsCollector(groups *GroupManager) *backendsCollector {
 		groups:  groups,
 		healthy: prometheus.NewDesc("jbalance_backends_healthy", "Current number of healthy backends, by group.", []string{"group"}, nil),
 		total:   prometheus.NewDesc("jbalance_backends_total", "Current total number of known backends (healthy or not), by group.", []string{"group"}, nil),
+		ejected: prometheus.NewDesc("jbalance_backends_ejected", "Current number of backends passively ejected from selection by outlier detection (circuit breaking), by group.", []string{"group"}, nil),
 	}
 }
 
 func (c *backendsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.healthy
 	ch <- c.total
+	ch <- c.ejected
 }
 
 func (c *backendsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -170,6 +188,7 @@ func (c *backendsCollector) Collect(ch chan<- prometheus.Metric) {
 		bl := c.groups.Ensure(group) // always already-created for a tracked group name — Ensure is idempotent, this never starts a new subscription
 		ch <- prometheus.MustNewConstMetric(c.healthy, prometheus.GaugeValue, float64(bl.HealthyLen()), group)
 		ch <- prometheus.MustNewConstMetric(c.total, prometheus.GaugeValue, float64(bl.Len()), group)
+		ch <- prometheus.MustNewConstMetric(c.ejected, prometheus.GaugeValue, float64(bl.EjectedLen()), group)
 	}
 }
 

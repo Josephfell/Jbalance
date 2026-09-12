@@ -84,6 +84,23 @@ func TestMetrics_ObserveTCPBytes_IgnoresNonPositive(t *testing.T) {
 	}
 }
 
+func TestMetrics_ObserveRetry_ExposedViaPromhttp(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+
+	m.ObserveRetry("web-tier")
+	m.ObserveRetry("web-tier")
+	m.ObserveRetry("api-tier")
+
+	body := scrapeMetrics(t, reg)
+	if !strings.Contains(body, `jbalance_http_retries_total{group="web-tier"} 2`) {
+		t.Errorf("expected 2 retries counted for web-tier, got:\n%s", body)
+	}
+	if !strings.Contains(body, `jbalance_http_retries_total{group="api-tier"} 1`) {
+		t.Errorf("expected 1 retry counted for api-tier, got:\n%s", body)
+	}
+}
+
 func TestBackendsCollector_ReflectsGroupManagerLive(t *testing.T) {
 	reg := prometheus.NewRegistry()
 
@@ -107,6 +124,9 @@ func TestBackendsCollector_ReflectsGroupManagerLive(t *testing.T) {
 	}
 	if !strings.Contains(body, `jbalance_backends_healthy{group="web-tier"} 1`) {
 		t.Errorf("expected backends_healthy 1, got:\n%s", body)
+	}
+	if !strings.Contains(body, `jbalance_backends_ejected{group="web-tier"} 0`) {
+		t.Errorf("expected backends_ejected 0 (none passively ejected), got:\n%s", body)
 	}
 }
 

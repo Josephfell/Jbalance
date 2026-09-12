@@ -89,7 +89,8 @@ func main() {
 	backendProtocol := flag.String("backend-protocol", envflag.String("LB_BACKEND_PROTOCOL", "http1"), "(http mode) protocol used to connect to backends: 'http1' (default) or 'h2c' (prior-knowledge HTTP/2 over cleartext, required to proxy gRPC backends). h2c also enables h2c on the listener so plaintext gRPC/HTTP2 clients can connect [env: LB_BACKEND_PROTOCOL]")
 
 	metricsAddr := flag.String("metrics-addr", envflag.String("LB_METRICS_ADDR", ":9100"), "address to serve Prometheus metrics on (/metrics), separate from the traffic listener so metrics scraping never competes with proxied paths/connections [env: LB_METRICS_ADDR]")
-	metricsDisable := flag.Bool("metrics-disable", envflag.Bool("LB_METRICS_DISABLE", false), "disable the Prometheus /metrics endpoint entirely [env: LB_METRICS_DISABLE]")
+	metricsEnabled := flag.Bool("metrics-enabled", envflag.Bool("LB_METRICS_ENABLED", true), "enable the Prometheus /metrics endpoint (set false, or LB_METRICS_ENABLED=false, to turn it off) [env: LB_METRICS_ENABLED]")
+	metricsDisable := flag.Bool("metrics-disable", envflag.Bool("LB_METRICS_DISABLE", false), "disable the Prometheus /metrics endpoint entirely (legacy alias for -metrics-enabled=false; if either flag disables metrics, they are off) [env: LB_METRICS_DISABLE]")
 	metricsReportInterval := flag.Duration("metrics-report-interval", envflag.Duration("LB_METRICS_REPORT_INTERVAL", 10*time.Second), "how often to push a traffic summary to the control plane, for display in the admin web UI's live charts [env: LB_METRICS_REPORT_INTERVAL]")
 	flag.Parse()
 
@@ -208,7 +209,8 @@ func main() {
 	defaultBackends := groups.Ensure(*group)
 
 	var metrics *dataplane.Metrics
-	if !*metricsDisable {
+	metricsOn := *metricsEnabled && !*metricsDisable
+	if metricsOn {
 		registry := prometheus.NewRegistry()
 		metrics = dataplane.NewMetrics(registry)
 		dataplane.RegisterBackendsCollector(registry, groups)
@@ -222,7 +224,7 @@ func main() {
 		metricsReporter := dataplane.NewMetricsReporter(*controlPlaneAddr, id, metrics, cpTLSConfig, *metricsReportInterval)
 		go metricsReporter.Run(ctx)
 	} else {
-		log.Println("dataplane: metrics endpoint disabled (-metrics-disable)")
+		log.Println("dataplane: metrics endpoint disabled")
 	}
 
 	if *protocol == "tcp" {
