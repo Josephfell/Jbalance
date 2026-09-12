@@ -3,7 +3,6 @@ package dataplane
 import (
 	"context"
 	"crypto/tls"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -11,6 +10,8 @@ import (
 	"time"
 
 	"golang.org/x/net/http2"
+
+	"github.com/Josephfell/Jbalance/internal/logging"
 )
 
 // ProxyConfig bounds how long the L7 proxy will spend talking to a
@@ -160,7 +161,7 @@ func NewProxy(routes *RouteTable, groups *GroupManager, metrics *Metrics, cfg Pr
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			addr, _ := r.Context().Value(backendAddrKey).(string)
-			log.Printf("dataplane: proxy error forwarding to %s: %v", addr, err)
+			logging.FromContext(r.Context()).Error("proxy error forwarding to backend", "component", "dataplane", "backend", addr, "error", err)
 			if ptr, ok := r.Context().Value(upstreamErrKey).(*bool); ok {
 				*ptr = true
 			}
@@ -253,7 +254,7 @@ func (p *Proxy) serveWithRetries(w http.ResponseWriter, r *http.Request, group s
 
 		// Connection-level failure and we still have retries left: pick a
 		// different backend after a short backoff.
-		log.Printf("dataplane: retrying request to group %q after backend %s failed (attempt %d/%d)", group, addr, attempt+1, attempts)
+		logging.FromContext(r.Context()).Warn("retrying request after backend failure", "component", "dataplane", "group", group, "backend", addr, "attempt", attempt+1, "attempts", attempts)
 		if p.metrics != nil {
 			p.metrics.ObserveRetry(group)
 		}

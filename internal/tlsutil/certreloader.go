@@ -19,7 +19,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -190,9 +190,9 @@ func (r *CertReloader) TLSConfig(caCertFile string) (*tls.Config, error) {
 // with the last good certificates. interval <= 0 disables polling (the
 // loop just waits for done), in which case reloads only happen via an
 // explicit Reload() call.
-func (r *CertReloader) Watch(done <-chan struct{}, interval time.Duration, logger *log.Logger) {
+func (r *CertReloader) Watch(done <-chan struct{}, interval time.Duration, logger *slog.Logger) {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	if interval <= 0 {
 		<-done
@@ -207,9 +207,9 @@ func (r *CertReloader) Watch(done <-chan struct{}, interval time.Duration, logge
 		case <-ticker.C:
 			if r.changedOnDisk() {
 				if err := r.Reload(); err != nil {
-					logger.Printf("tlsutil: cert reload failed, keeping previous certificates: %v", err)
+					logger.Error("cert reload failed, keeping previous certificates", "component", "tlsutil", "error", err)
 				} else {
-					logger.Printf("tlsutil: reloaded TLS certificates from disk")
+					logger.Info("reloaded TLS certificates from disk", "component", "tlsutil")
 				}
 			}
 		}

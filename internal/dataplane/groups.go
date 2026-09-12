@@ -3,7 +3,7 @@ package dataplane
 import (
 	"context"
 	"crypto/tls"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -134,7 +134,7 @@ func (m *GroupManager) Ensure(group string) *BackendList {
 	reporter := NewHealthReporter(m.controlPlaneAddr, group, m.instanceID, bl, m.tlsConfig, m.healthReportInterval)
 	go reporter.Run(m.baseCtx)
 
-	log.Printf("dataplane: started subscription for newly referenced group %q", group)
+	slog.Info("started subscription for newly referenced group", "component", "dataplane", "group", group)
 	return bl
 }
 

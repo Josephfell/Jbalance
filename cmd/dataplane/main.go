@@ -18,7 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -33,8 +33,18 @@ import (
 
 	"github.com/Josephfell/Jbalance/internal/dataplane"
 	"github.com/Josephfell/Jbalance/internal/envflag"
+	"github.com/Josephfell/Jbalance/internal/logging"
 	"github.com/Josephfell/Jbalance/internal/tlsutil"
 )
+
+// fatal logs a fatal error via slog (so the message obeys the configured
+// level/format like every other line) and exits non-zero, replacing the
+// old log.Fatalf which wrote through the standard logger and bypassed the
+// structured handler.
+func fatal(msg string, args ...any) {
+	slog.Error(msg, append([]any{"component", "dataplane"}, args...)...)
+	os.Exit(1)
+}
 
 // Every flag below can also be set via the environment variable named in
 // its usage string (e.g. from a Docker Compose env_file) — an explicitly
@@ -94,7 +104,16 @@ func main() {
 	metricsReportInterval := flag.Duration("metrics-report-interval", envflag.Duration("LB_METRICS_REPORT_INTERVAL", 10*time.Second), "how often to push a traffic summary to the control plane, for display in the admin web UI's live charts [env: LB_METRICS_REPORT_INTERVAL]")
 
 	opsAddr := flag.String("ops-addr", envflag.String("LB_OPS_ADDR", ":9101"), "address for the ops/health listener serving liveness (/healthz) and readiness (/readyz) probes, on its own port separate from the traffic listener (so a probe never competes with proxied traffic and works in tcp mode too); set empty to disable [env: LB_OPS_ADDR]")
+
+	logLevel := flag.String("log-level", envflag.String("LB_LOG_LEVEL", "info"), "minimum log level: debug, info, warn, or error [env: LB_LOG_LEVEL]")
+	logFormat := flag.String("log-format", envflag.String("LB_LOG_FORMAT", "text"), "structured log output format: 'json' (for log aggregation) or 'text' (human-readable, default) [env: LB_LOG_FORMAT]")
 	flag.Parse()
+
+	// Install the process-wide structured logger before any log line is
+	// emitted, so every component (and slog-aware libraries) share one
+	// level and format.
+	logger := logging.Setup(logging.Config{Level: *logLevel, Format: *logFormat})
+	logger = logging.Component(logger, "dataplane")
 
 	id := *instanceID
 	if id == "" {
@@ -112,23 +131,23 @@ func main() {
 	if *cpTLSEnable {
 		cfg, err := tlsutil.LoadClientConfig(*cpTLSClientCert, *cpTLSClientKey, *cpTLSCACert)
 		if err != nil {
-			log.Fatalf("dataplane: %v", err)
+			fatal("startup error", "error", err)
 		}
 		cpTLSConfig = cfg
 	} else {
-		log.Println("dataplane: WARNING connecting to control plane without TLS — use -control-plane-tls outside of local development.")
+		slog.Warn("connecting to control plane without TLS - use -control-plane-tls outside of local development", "component", "dataplane")
 	}
 
 	if *protocol != "http" && *protocol != "tcp" {
-		log.Fatalf("dataplane: unknown -protocol %q (must be 'http' or 'tcp')", *protocol)
+		fatal("unknown -protocol (must be 'http' or 'tcp')", "protocol", *protocol)
 	}
 
 	if *healthCheckMode != "tcp" && *healthCheckMode != "http" {
-		log.Fatalf("dataplane: unknown -health-check-mode %q (must be 'tcp' or 'http')", *healthCheckMode)
+		fatal("unknown -health-check-mode (must be 'tcp' or 'http')", "mode", *healthCheckMode)
 	}
 
 	if *backendProtocol != "http1" && *backendProtocol != "h2c" {
-		log.Fatalf("dataplane: unknown -backend-protocol %q (must be 'http1' or 'h2c')", *backendProtocol)
+		fatal("unknown -backend-protocol (must be 'http1' or 'h2c')", "protocol", *backendProtocol)
 	}
 
 	// Assemble the TLS certificate reloader (SNI + hot-reload) from the
@@ -142,15 +161,15 @@ func main() {
 		}
 		extra, err := tlsutil.ParseCertPairs(*httpTLSCerts)
 		if err != nil {
-			log.Fatalf("dataplane: %v", err)
+			fatal("startup error", "error", err)
 		}
 		pairs = append(pairs, extra...)
 		if len(pairs) > 0 {
 			certReloader, err = tlsutil.NewCertReloader(pairs)
 			if err != nil {
-				log.Fatalf("dataplane: %v", err)
+				fatal("startup error", "error", err)
 			}
-			log.Printf("dataplane: TLS listener enabled with %d certificate(s): %v", len(pairs), certReloader.CertNames())
+			slog.Info("TLS listener enabled", "component", "dataplane", "certs", len(pairs), "names", certReloader.CertNames())
 			// Hot-reload on file change (if a poll interval is set) and on
 			// SIGHUP, so a rotated cert is picked up without a restart.
 			done := make(chan struct{})
@@ -168,9 +187,9 @@ func main() {
 						return
 					case <-hup:
 						if err := certReloader.Reload(); err != nil {
-							log.Printf("dataplane: SIGHUP cert reload failed, keeping previous certificates: %v", err)
+							slog.Error("SIGHUP cert reload failed, keeping previous certificates", "component", "dataplane", "error", err)
 						} else {
-							log.Printf("dataplane: SIGHUP reloaded TLS certificates: %v", certReloader.CertNames())
+							slog.Info("SIGHUP reloaded TLS certificates", "component", "dataplane", "names", certReloader.CertNames())
 						}
 					}
 				}
@@ -206,7 +225,7 @@ func main() {
 		MaxEjectPercent:   *outlierMaxEjectPercent,
 	})
 	if *outlierDetection {
-		log.Printf("dataplane: passive outlier detection enabled (%d consecutive errors -> eject for %s, max %d%% of a group)", *outlierConsecutiveErrors, *outlierEjectDuration, *outlierMaxEjectPercent)
+		slog.Info("passive outlier detection enabled", "component", "dataplane", "consecutive_errors", *outlierConsecutiveErrors, "eject_duration", *outlierEjectDuration, "max_eject_percent", *outlierMaxEjectPercent)
 	}
 	defaultBackends := groups.Ensure(*group)
 
@@ -226,7 +245,7 @@ func main() {
 		metricsReporter := dataplane.NewMetricsReporter(*controlPlaneAddr, id, metrics, cpTLSConfig, *metricsReportInterval)
 		go metricsReporter.Run(ctx)
 	} else {
-		log.Println("dataplane: metrics endpoint disabled")
+		slog.Info("metrics endpoint disabled", "component", "dataplane")
 	}
 
 	// Ops/health listener: liveness (/healthz) and readiness (/readyz) on
@@ -264,14 +283,14 @@ func main() {
 		Enabled: *accessLog,
 		Format:  dataplane.AccessLogFormat(*accessLogFormat),
 	}
-	mux.Handle("/", dataplane.AccessLogMiddleware(proxy.Handler(), accessLogCfg, nil))
+	mux.Handle("/", dataplane.AccessLogMiddleware(proxy.Handler(), accessLogCfg, nil, logger))
 	if *accessLog {
-		log.Printf("dataplane: access logging enabled (format=%s)", *accessLogFormat)
+		slog.Info("access logging enabled", "component", "dataplane", "format", *accessLogFormat)
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("ok")); err != nil {
-			log.Printf("dataplane: failed to write /healthz response: %v", err)
+			slog.Error("failed to write /healthz response", "component", "dataplane", "error", err)
 		}
 	})
 	mux.HandleFunc("/debug/backends", func(w http.ResponseWriter, r *http.Request) {
@@ -283,7 +302,7 @@ func main() {
 			"routes configured: " + strconv.Itoa(routes.Len()) + "\n" +
 			"tracked groups: " + strings.Join(groups.Groups(), ", ") + "\n"
 		if _, err := w.Write([]byte(body)); err != nil {
-			log.Printf("dataplane: failed to write /debug/backends response: %v", err)
+			slog.Error("failed to write /debug/backends response", "component", "dataplane", "error", err)
 		}
 	})
 
@@ -303,39 +322,39 @@ func main() {
 		protos.SetHTTP1(true)
 		protos.SetUnencryptedHTTP2(true)
 		server.Protocols = &protos
-		log.Println("dataplane: h2c enabled on listener (gRPC/HTTP2 cleartext)")
+		slog.Info("h2c enabled on listener (gRPC/HTTP2 cleartext)", "component", "dataplane")
 	}
 
 	go func() {
 		<-ctx.Done()
-		log.Printf("dataplane: shutting down HTTP server (draining in-flight requests, up to %s)...", *shutdownGrace)
+		slog.Info("shutting down HTTP server, draining in-flight requests", "component", "dataplane", "grace", *shutdownGrace)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), *shutdownGrace)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("dataplane: instance %q serving group %q on %s, control plane at %s", id, *group, *listenAddr, *controlPlaneAddr)
+	slog.Info("instance serving", "component", "dataplane", "instance", id, "group", *group, "listen", *listenAddr, "control_plane", *controlPlaneAddr)
 
 	var serveErr error
 	if certReloader != nil {
 		tlsCfg, err := certReloader.TLSConfig(*httpTLSClientCA)
 		if err != nil {
-			log.Fatalf("dataplane: %v", err)
+			fatal("startup error", "error", err)
 		}
 		server.TLSConfig = tlsCfg
 		ln, err := net.Listen("tcp", *listenAddr)
 		if err != nil {
-			log.Fatalf("dataplane: failed to listen on %s: %v", *listenAddr, err)
+			fatal("failed to listen", "addr", *listenAddr, "error", err)
 		}
-		log.Println("dataplane: HTTP listener TLS enabled (SNI + hot-reload)")
+		slog.Info("HTTP listener TLS enabled (SNI + hot-reload)", "component", "dataplane")
 		// Empty cert/key args: the certificates come from TLSConfig.GetCertificate.
 		serveErr = server.ServeTLS(ln, "", "")
 	} else {
-		log.Println("dataplane: WARNING HTTP listener running without TLS — use -http-tls-cert/-http-tls-key outside of local development.")
+		slog.Warn("HTTP listener running without TLS - use -http-tls-cert/-http-tls-key outside of local development", "component", "dataplane")
 		serveErr = server.ListenAndServe()
 	}
 	if serveErr != nil && serveErr != http.ErrServerClosed {
-		log.Fatalf("dataplane: HTTP server error: %v", serveErr)
+		fatal("HTTP server error", "error", serveErr)
 	}
 }
 
@@ -350,16 +369,16 @@ func runTCP(ctx context.Context, id, group, listenAddr, controlPlaneAddr string,
 	if certReloader != nil {
 		tlsCfg, cfgErr := certReloader.TLSConfig(clientCA)
 		if cfgErr != nil {
-			log.Fatalf("dataplane: %v", cfgErr)
+			fatal("startup error", "error", cfgErr)
 		}
-		log.Println("dataplane: TCP listener TLS enabled (SNI + hot-reload)")
+		slog.Info("TCP listener TLS enabled (SNI + hot-reload)", "component", "dataplane")
 		ln, err = tls.Listen("tcp", listenAddr, tlsCfg)
 	} else {
-		log.Println("dataplane: WARNING TCP listener running without TLS — use -http-tls-cert/-http-tls-key outside of local development.")
+		slog.Warn("TCP listener running without TLS - use -http-tls-cert/-http-tls-key outside of local development", "component", "dataplane")
 		ln, err = net.Listen("tcp", listenAddr)
 	}
 	if err != nil {
-		log.Fatalf("dataplane: failed to listen on %s: %v", listenAddr, err)
+		fatal("failed to listen", "addr", listenAddr, "error", err)
 	}
 
 	proxy := dataplane.NewTCPProxy(group, backends, metrics)
@@ -367,19 +386,19 @@ func runTCP(ctx context.Context, id, group, listenAddr, controlPlaneAddr string,
 
 	go func() {
 		<-ctx.Done()
-		log.Printf("dataplane: shutting down TCP listener (draining in-flight connections, up to %s)...", shutdownGrace)
+		slog.Info("shutting down TCP listener, draining in-flight connections", "component", "dataplane", "grace", shutdownGrace)
 		// Stop accepting new connections first, then let existing ones
 		// drain up to the grace period.
 		_ = ln.Close()
 		if !proxy.Drain(shutdownGrace) {
-			log.Println("dataplane: TCP drain grace period elapsed with connections still in flight")
+			slog.Warn("TCP drain grace period elapsed with connections still in flight", "component", "dataplane")
 		}
 	}()
 
-	log.Printf("dataplane: instance %q serving group %q (tcp) on %s, control plane at %s", id, group, listenAddr, controlPlaneAddr)
+	slog.Info("instance serving (tcp)", "component", "dataplane", "instance", id, "group", group, "listen", listenAddr, "control_plane", controlPlaneAddr)
 
 	if err := proxy.Serve(ctx, ln); err != nil {
-		log.Fatalf("dataplane: TCP proxy error: %v", err)
+		fatal("TCP proxy error", "error", err)
 	}
 }
 
@@ -409,9 +428,9 @@ func startMetricsServer(ctx context.Context, addr string, registry *prometheus.R
 	}()
 
 	go func() {
-		log.Printf("dataplane: metrics endpoint listening on %s/metrics", addr)
+		slog.Info("metrics endpoint listening", "component", "dataplane", "addr", addr+"/metrics")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("dataplane: metrics server error: %v", err)
+			slog.Error("metrics server error", "component", "dataplane", "error", err)
 		}
 	}()
 }
@@ -438,7 +457,7 @@ func startMetricsServer(ctx context.Context, addr string, registry *prometheus.R
 // aid, not something that should take down request proxying.
 func startOpsServer(ctx context.Context, addr string, ready func() bool) {
 	if addr == "" {
-		log.Println("dataplane: ops/health listener disabled (empty -ops-addr)")
+		slog.Info("ops/health listener disabled (empty -ops-addr)", "component", "dataplane")
 		return
 	}
 
@@ -456,9 +475,9 @@ func startOpsServer(ctx context.Context, addr string, ready func() bool) {
 	}()
 
 	go func() {
-		log.Printf("dataplane: ops/health listener on %s (/healthz liveness, /readyz readiness)", addr)
+		slog.Info("ops/health listener", "component", "dataplane", "addr", addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("dataplane: ops/health server error: %v", err)
+			slog.Error("ops/health server error", "component", "dataplane", "error", err)
 		}
 	}()
 }
@@ -473,7 +492,7 @@ func opsMux(ready func() bool) *http.ServeMux {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("ok")); err != nil {
-			log.Printf("dataplane: failed to write /healthz response: %v", err)
+			slog.Error("failed to write /healthz response", "component", "dataplane", "error", err)
 		}
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
@@ -481,13 +500,13 @@ func opsMux(ready func() bool) *http.ServeMux {
 		if ready != nil && ready() {
 			w.WriteHeader(http.StatusOK)
 			if _, err := w.Write([]byte("ready")); err != nil {
-				log.Printf("dataplane: failed to write /readyz response: %v", err)
+				slog.Error("failed to write /readyz response", "component", "dataplane", "error", err)
 			}
 			return
 		}
 		w.WriteHeader(http.StatusServiceUnavailable)
 		if _, err := w.Write([]byte("not ready: no healthy backends")); err != nil {
-			log.Printf("dataplane: failed to write /readyz response: %v", err)
+			slog.Error("failed to write /readyz response", "component", "dataplane", "error", err)
 		}
 	})
 	return mux

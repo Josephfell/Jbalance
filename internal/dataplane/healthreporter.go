@@ -3,7 +3,7 @@ package dataplane
 import (
 	"context"
 	"crypto/tls"
-	"log"
+	"log/slog"
 	"time"
 
 	"google.golang.org/grpc"
@@ -60,12 +60,12 @@ func (r *HealthReporter) Run(ctx context.Context) {
 
 	conn, err := grpc.NewClient(r.controlPlaneAddr, grpc.WithTransportCredentials(transportCreds))
 	if err != nil {
-		log.Printf("dataplane: health reporter failed to create client: %v", err)
+		slog.Error("health reporter failed to create client", "component", "dataplane", "error", err)
 		return
 	}
 	defer func() {
 		if cerr := conn.Close(); cerr != nil {
-			log.Printf("dataplane: error closing health reporter connection: %v", cerr)
+			slog.Error("error closing health reporter connection", "component", "dataplane", "error", cerr)
 		}
 	}()
 
@@ -104,6 +104,6 @@ func (r *HealthReporter) reportOnce(ctx context.Context, client pb.ControlPlaneC
 		Backends:   backends,
 	})
 	if err != nil {
-		log.Printf("dataplane: failed to report health to control plane: %v", err)
+		slog.Warn("failed to report health to control plane", "component", "dataplane", "error", err)
 	}
 }

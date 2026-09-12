@@ -1,7 +1,7 @@
 package dataplane
 
 import (
-	"log"
+	"log/slog"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -331,7 +331,10 @@ func (b *BackendList) RecordResult(address string, success bool) {
 // (false-positive) gosec taint annotation lives on one small, obviously
 // trusted-input function rather than inline in RecordResult.
 func logEjection(address string, dur time.Duration, threshold, ejectCount int) {
-	log.Printf("dataplane: backend %s passively ejected for %s after %d consecutive errors (ejection #%d)", address, dur, threshold, ejectCount) //nolint:gosec // G706: address is trusted control-plane data, not attacker input
+	// address is a structured attribute (not interpolated into a format
+	// string), so the former gosec G706 tainted-format-string finding no
+	// longer applies.
+	slog.Warn("backend passively ejected", "component", "dataplane", "backend", address, "duration", dur, "consecutive_errors", threshold, "ejection", ejectCount)
 }
 
 // EjectedLen returns the current number of passively-ejected backends,

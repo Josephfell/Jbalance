@@ -3,7 +3,7 @@ package dataplane
 import (
 	"context"
 	"crypto/tls"
-	"log"
+	"log/slog"
 	"time"
 
 	"google.golang.org/grpc"
@@ -55,7 +55,7 @@ func (s *RouteSubscriber) Run(ctx context.Context) {
 		}
 
 		if err != nil {
-			log.Printf("dataplane: route table stream error: %v (retrying in %s)", err, backoff)
+			slog.Warn("route table stream error, retrying", "component", "dataplane", "backoff", backoff, "error", err)
 			select {
 			case <-ctx.Done():
 				return
@@ -86,7 +86,7 @@ func (s *RouteSubscriber) streamOnce(ctx context.Context) (bool, error) {
 	}
 	defer func() {
 		if cerr := conn.Close(); cerr != nil {
-			log.Printf("dataplane: error closing route table connection: %v", cerr)
+			slog.Error("error closing route table connection", "component", "dataplane", "error", cerr)
 		}
 	}()
 
@@ -96,7 +96,7 @@ func (s *RouteSubscriber) streamOnce(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	log.Printf("dataplane: connected to control plane at %s for route table", s.controlPlaneAddr)
+	slog.Info("connected to control plane for route table", "component", "dataplane", "addr", s.controlPlaneAddr)
 
 	receivedAny := false
 	for {
@@ -109,6 +109,6 @@ func (s *RouteSubscriber) streamOnce(ctx context.Context) (bool, error) {
 		}
 		receivedAny = true
 		s.routes.Update(table)
-		log.Printf("dataplane: route table updated to version %d (%d rules)", table.Version, len(table.Routes))
+		slog.Info("route table updated", "component", "dataplane", "version", table.Version, "rules", len(table.Routes))
 	}
 }

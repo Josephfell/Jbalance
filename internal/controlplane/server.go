@@ -7,7 +7,7 @@ package controlplane
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"math"
 	"sort"
 	"sync"
@@ -176,7 +176,7 @@ func (s *Server) Run(ctx context.Context, interval time.Duration) {
 func (s *Server) reconcile(ctx context.Context) {
 	groups, err := s.provider.Groups(ctx)
 	if err != nil {
-		log.Printf("controlplane: failed to list groups: %v", err)
+		slog.Error("failed to list groups", "component", "controlplane", "error", err)
 		return
 	}
 
@@ -188,7 +188,7 @@ func (s *Server) reconcile(ctx context.Context) {
 func (s *Server) reconcileGroup(ctx context.Context, group string) {
 	snap, err := s.provider.Snapshot(ctx, group)
 	if err != nil {
-		log.Printf("controlplane: failed to snapshot group %q: %v", group, err)
+		slog.Error("failed to snapshot group", "component", "controlplane", "group", group, "error", err)
 		return
 	}
 	s.publishIfChanged(group, snap)
@@ -307,10 +307,10 @@ func (s *Server) publishRoutes() {
 		select {
 		case ch <- table:
 		default:
-			log.Printf("controlplane: route table subscriber is slow, dropping update")
+			slog.Warn("route table subscriber is slow, dropping update", "component", "controlplane")
 		}
 	}
-	log.Printf("controlplane: route table updated to version %d (%d rules)", table.Version, len(table.Routes))
+	slog.Info("route table updated", "component", "controlplane", "version", table.Version, "rules", len(table.Routes))
 }
 
 // StreamRoutes implements pb.ControlPlaneServer. It registers the caller
@@ -331,7 +331,7 @@ func (s *Server) StreamRoutes(req *pb.StreamRoutesRequest, stream pb.ControlPlan
 		s.routeSubsMu.Unlock()
 	}()
 
-	log.Printf("controlplane: data plane %q subscribed to route table", instanceID)
+	slog.Info("data plane subscribed to route table", "component", "controlplane", "instance", instanceID)
 
 	if current != nil {
 		if err := stream.Send(current); err != nil {
@@ -343,7 +343,7 @@ func (s *Server) StreamRoutes(req *pb.StreamRoutesRequest, stream pb.ControlPlan
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("controlplane: data plane %q disconnected from route table stream", instanceID)
+			slog.Info("data plane disconnected from route table stream", "component", "controlplane", "instance", instanceID)
 			return ctx.Err()
 		case update := <-ch:
 			if err := stream.Send(update); err != nil {
@@ -360,7 +360,7 @@ func (s *Server) StreamRoutes(req *pb.StreamRoutesRequest, stream pb.ControlPlan
 func (s *Server) forceRepublish(ctx context.Context, group string) {
 	snap, err := s.provider.Snapshot(ctx, group)
 	if err != nil {
-		log.Printf("controlplane: failed to snapshot group %q while applying override: %v", group, err)
+		slog.Error("failed to snapshot group while applying override", "component", "controlplane", "group", group, "error", err)
 		return
 	}
 
@@ -385,11 +385,11 @@ func (s *Server) forceRepublish(ctx context.Context, group string) {
 		select {
 		case ch <- next:
 		default:
-			log.Printf("controlplane: subscriber for group %q is slow, dropping override update", group)
+			slog.Warn("subscriber is slow, dropping override update", "component", "controlplane", "group", group)
 		}
 	}
 
-	log.Printf("controlplane: group %q updated to version %d (%d backends) after override change", group, next.Version, len(next.Backends))
+	slog.Info("backend group updated after override change", "component", "controlplane", "group", group, "version", next.Version, "backends", len(next.Backends))
 }
 
 // publishIfChanged compares the new snapshot against the last one sent for
@@ -421,11 +421,11 @@ func (s *Server) publishIfChanged(group string, snap pool.Snapshot) {
 		select {
 		case ch <- next:
 		default:
-			log.Printf("controlplane: subscriber for group %q is slow, dropping update", group)
+			slog.Warn("subscriber is slow, dropping update", "component", "controlplane", "group", group)
 		}
 	}
 
-	log.Printf("controlplane: group %q updated to version %d (%d backends)", group, next.Version, len(next.Backends))
+	slog.Info("backend group updated", "component", "controlplane", "group", group, "version", next.Version, "backends", len(next.Backends))
 }
 
 // StreamBackends implements pb.ControlPlaneServer. It registers the caller
@@ -443,7 +443,7 @@ func (s *Server) StreamBackends(req *pb.StreamBackendsRequest, stream pb.Control
 	s.markInstanceConnected(instanceID, group)
 	defer s.markInstanceDisconnected(instanceID)
 
-	log.Printf("controlplane: data plane %q subscribed to group %q", instanceID, group)
+	slog.Info("data plane subscribed to group", "component", "controlplane", "instance", instanceID, "group", group)
 
 	// Send the current snapshot immediately so a newly-connected data plane
 	// doesn't sit with an empty backend list until the next reconcile tick.
@@ -460,7 +460,7 @@ func (s *Server) StreamBackends(req *pb.StreamBackendsRequest, stream pb.Control
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("controlplane: data plane %q disconnected from group %q", instanceID, group)
+			slog.Info("data plane disconnected from group", "component", "controlplane", "instance", instanceID, "group", group)
 			return ctx.Err()
 		case update := <-ch:
 			if err := stream.Send(update); err != nil {
@@ -742,7 +742,7 @@ type GroupState struct {
 func (s *Server) Snapshot(ctx context.Context) []GroupState {
 	groups, err := s.provider.Groups(ctx)
 	if err != nil {
-		log.Printf("controlplane: failed to list groups for snapshot: %v", err)
+		slog.Error("failed to list groups for snapshot", "component", "controlplane", "error", err)
 		return nil
 	}
 
@@ -750,7 +750,7 @@ func (s *Server) Snapshot(ctx context.Context) []GroupState {
 	for _, group := range groups {
 		snap, err := s.provider.Snapshot(ctx, group)
 		if err != nil {
-			log.Printf("controlplane: failed to snapshot group %q for display: %v", group, err)
+			slog.Error("failed to snapshot group for display", "component", "controlplane", "group", group, "error", err)
 			continue
 		}
 

@@ -16,7 +16,7 @@ package dataplane
 import (
 	"context"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -156,7 +156,7 @@ func (p *TCPProxy) handleConn(ctx context.Context, client net.Conn) {
 
 	addr, ok := p.backends.Next()
 	if !ok {
-		log.Printf("dataplane: tcp proxy: no healthy backends available, closing connection from %s", client.RemoteAddr())
+		slog.Warn("tcp proxy: no healthy backends available, closing connection", "component", "dataplane", "client", client.RemoteAddr().String())
 		return
 	}
 	defer p.backends.Release(addr)
@@ -166,7 +166,7 @@ func (p *TCPProxy) handleConn(ctx context.Context, client net.Conn) {
 	cancel()
 	if err != nil {
 		p.backends.RecordResult(addr, false)
-		log.Printf("dataplane: tcp proxy: failed to connect to backend %s: %v", addr, err)
+		slog.Warn("tcp proxy: failed to connect to backend", "component", "dataplane", "backend", addr, "error", err)
 		return
 	}
 	p.backends.RecordResult(addr, true)

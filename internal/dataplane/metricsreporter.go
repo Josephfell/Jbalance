@@ -3,7 +3,7 @@ package dataplane
 import (
 	"context"
 	"crypto/tls"
-	"log"
+	"log/slog"
 	"time"
 
 	"google.golang.org/grpc"
@@ -55,12 +55,12 @@ func (r *MetricsReporter) Run(ctx context.Context) {
 
 	conn, err := grpc.NewClient(r.controlPlaneAddr, grpc.WithTransportCredentials(transportCreds))
 	if err != nil {
-		log.Printf("dataplane: metrics reporter failed to create client: %v", err)
+		slog.Error("metrics reporter failed to create client", "component", "dataplane", "error", err)
 		return
 	}
 	defer func() {
 		if cerr := conn.Close(); cerr != nil {
-			log.Printf("dataplane: error closing metrics reporter connection: %v", cerr)
+			slog.Error("error closing metrics reporter connection", "component", "dataplane", "error", cerr)
 		}
 	}()
 
@@ -104,6 +104,6 @@ func (r *MetricsReporter) reportOnce(ctx context.Context, client pb.ControlPlane
 		Groups:     groups,
 	})
 	if err != nil {
-		log.Printf("dataplane: failed to report metrics to control plane: %v", err)
+		slog.Warn("failed to report metrics to control plane", "component", "dataplane", "error", err)
 	}
 }
