@@ -3,7 +3,7 @@ package dataplane
 import (
 	"context"
 	"crypto/tls"
-	"log"
+	"log/slog"
 	"time"
 
 	"google.golang.org/grpc"
@@ -59,7 +59,7 @@ func (s *Subscriber) Run(ctx context.Context) {
 		}
 
 		if err != nil {
-			log.Printf("dataplane: control plane stream error: %v (retrying in %s)", err, backoff)
+			slog.Warn("control plane stream error, retrying", "component", "dataplane", "group", s.group, "backoff", backoff, "error", err)
 			select {
 			case <-ctx.Done():
 				return
@@ -94,7 +94,7 @@ func (s *Subscriber) streamOnce(ctx context.Context) (bool, error) {
 	}
 	defer func() {
 		if cerr := conn.Close(); cerr != nil {
-			log.Printf("dataplane: error closing control plane connection: %v", cerr)
+			slog.Error("error closing control plane connection", "component", "dataplane", "error", cerr)
 		}
 	}()
 
@@ -107,7 +107,7 @@ func (s *Subscriber) streamOnce(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	log.Printf("dataplane: connected to control plane at %s for group %q", s.controlPlaneAddr, s.group)
+	slog.Info("connected to control plane", "component", "dataplane", "addr", s.controlPlaneAddr, "group", s.group)
 
 	receivedAny := false
 	for {
@@ -120,6 +120,6 @@ func (s *Subscriber) streamOnce(ctx context.Context) (bool, error) {
 		}
 		receivedAny = true
 		s.backends.Update(set)
-		log.Printf("dataplane: group %q updated to version %d (%d backends)", set.Group, set.Version, len(set.Backends))
+		slog.Info("backend group updated", "component", "dataplane", "group", set.Group, "version", set.Version, "backends", len(set.Backends))
 	}
 }

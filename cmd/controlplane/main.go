@@ -8,9 +8,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -24,10 +25,19 @@ import (
 	"github.com/Josephfell/Jbalance/internal/admin"
 	"github.com/Josephfell/Jbalance/internal/controlplane"
 	"github.com/Josephfell/Jbalance/internal/envflag"
+	"github.com/Josephfell/Jbalance/internal/logging"
 	"github.com/Josephfell/Jbalance/internal/pool"
 	"github.com/Josephfell/Jbalance/internal/tlsutil"
 	pb "github.com/Josephfell/Jbalance/proto"
 )
+
+// fatal logs a fatal error via slog (obeying the configured level/format)
+// and exits non-zero, replacing the old log.Fatalf which bypassed the
+// structured handler.
+func fatal(msg string, args ...any) {
+	slog.Error(msg, append([]any{"component", "controlplane"}, args...)...)
+	os.Exit(1)
+}
 
 // Every flag below can also be set via the environment variable named in
 // its usage string (e.g. from a Docker Compose env_file) — an explicitly
@@ -70,7 +80,15 @@ func main() {
 	adminTrustForwardedFor := flag.Bool("admin-trust-forwarded-for", envflag.Bool("LB_ADMIN_TRUST_FORWARDED_FOR", false), "trust the X-Forwarded-For header for admin login rate limiting; only enable behind a trusted reverse proxy [env: LB_ADMIN_TRUST_FORWARDED_FOR]")
 	adminForceResetPassword := flag.Bool("admin-force-reset-password", envflag.Bool("LB_ADMIN_FORCE_RESET_PASSWORD", false), "generate a new random admin password on startup, printed to the log, even if a password is already set — use this to recover from a lost password [env: LB_ADMIN_FORCE_RESET_PASSWORD]")
 
+	logLevel := flag.String("log-level", envflag.String("LB_LOG_LEVEL", "info"), "minimum log level: debug, info, warn, or error [env: LB_LOG_LEVEL]")
+	logFormat := flag.String("log-format", envflag.String("LB_LOG_FORMAT", "text"), "structured log output format: 'json' (for log aggregation) or 'text' (human-readable, default) [env: LB_LOG_FORMAT]")
+
 	flag.Parse()
+
+	// Install the process-wide structured logger before any log line is
+	// emitted, so every component (and slog-aware libraries) share one
+	// level and format.
+	logging.Setup(logging.Config{Level: *logLevel, Format: *logFormat})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -88,7 +106,7 @@ func main() {
 		k8sKubeconfig: *k8sKubeconfig,
 	})
 	if err != nil {
-		log.Fatalf("controlplane: %v", err)
+		fatal("startup error", "error", err)
 	}
 	if cleanup != nil {
 		defer cleanup()
@@ -112,27 +130,27 @@ func main() {
 			trustForwardedFor: *adminTrustForwardedFor,
 			forceReset:        *adminForceResetPassword,
 		}); err != nil {
-			log.Fatalf("controlplane: failed to start admin web UI: %v", err)
+			fatal("failed to start admin web UI", "error", err)
 		}
 	} else {
-		log.Println("controlplane: admin web UI disabled (-admin-disable)")
+		slog.Info("admin web UI disabled (-admin-disable)", "component", "controlplane")
 	}
 
 	lis, err := net.Listen("tcp", *grpcAddr)
 	if err != nil {
-		log.Fatalf("controlplane: failed to listen on %s: %v", *grpcAddr, err)
+		fatal("failed to listen", "addr", *grpcAddr, "error", err)
 	}
 
 	var serverOpts []grpc.ServerOption
 	if *tlsCertFile != "" {
 		tlsConfig, err := tlsutil.LoadServerConfig(*tlsCertFile, *tlsKeyFile, *tlsClientCAFile)
 		if err != nil {
-			log.Fatalf("controlplane: %v", err)
+			fatal("startup error", "error", err)
 		}
 		serverOpts = append(serverOpts, grpc.Creds(credentials.NewTLS(tlsConfig)))
-		log.Printf("controlplane: TLS enabled (mutual TLS: %v)", *tlsClientCAFile != "")
+		slog.Info("TLS enabled", "component", "controlplane", "mutual_tls", *tlsClientCAFile != "")
 	} else {
-		log.Println("controlplane: WARNING running without TLS — gRPC traffic is unencrypted. Use -tls-cert/-tls-key outside of local development.")
+		slog.Warn("running without TLS - gRPC traffic is unencrypted; use -tls-cert/-tls-key outside of local development", "component", "controlplane")
 	}
 
 	grpcServer := grpc.NewServer(serverOpts...)
@@ -140,13 +158,13 @@ func main() {
 
 	go func() {
 		<-ctx.Done()
-		log.Println("controlplane: shutting down gRPC server...")
+		slog.Info("shutting down gRPC server", "component", "controlplane")
 		grpcServer.GracefulStop()
 	}()
 
-	log.Printf("controlplane: gRPC server listening on %s", *grpcAddr)
+	slog.Info("gRPC server listening", "component", "controlplane", "addr", *grpcAddr)
 	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("controlplane: gRPC server error: %v", err)
+		fatal("gRPC server error", "error", err)
 	}
 }
 
@@ -172,29 +190,33 @@ func startAdminServer(ctx context.Context, cpServer *controlplane.Server, cfg ad
 	auditLog := admin.OpenAuditLog(cfg.auditLogPath)
 
 	if generated != nil {
-		log.Println("=========================================================")
-		log.Println(" Go Load Balancer — admin web UI initial password")
-		log.Println("")
-		log.Printf("   Password: %s", generated.Password)
-		log.Println("")
-		log.Println(" This password is shown ONLY ONCE and is not stored in")
-		log.Println(" plaintext anywhere. Save it now. You can change it from")
-		log.Println(" the web UI after signing in, or recover a lost password")
-		log.Println(" by restarting with -admin-force-reset-password.")
-		log.Println("=========================================================")
+		// A one-time, human-readable console box, deliberately kept as
+		// plain formatted output (not a structured slog record) so the
+		// operator can read and copy the initial password at a glance. It
+		// is shown once and never stored in plaintext.
+		fmt.Fprintln(os.Stderr, "=========================================================")
+		fmt.Fprintln(os.Stderr, " Go Load Balancer — admin web UI initial password")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintf(os.Stderr, "   Password: %s\n", generated.Password)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, " This password is shown ONLY ONCE and is not stored in")
+		fmt.Fprintln(os.Stderr, " plaintext anywhere. Save it now. You can change it from")
+		fmt.Fprintln(os.Stderr, " the web UI after signing in, or recover a lost password")
+		fmt.Fprintln(os.Stderr, " by restarting with -admin-force-reset-password.")
+		fmt.Fprintln(os.Stderr, "=========================================================")
 	} else if cfg.forceReset {
 		newPassword, err := store.ResetToRandomPassword()
 		if err != nil {
 			return fmt.Errorf("failed to force-reset admin password: %w", err)
 		}
 		auditLog.Record(admin.AuditPasswordReset, "", "password force-reset via -admin-force-reset-password")
-		log.Println("=========================================================")
-		log.Println(" Go Load Balancer — admin password RESET (-admin-force-reset-password)")
-		log.Println("")
-		log.Printf("   New password: %s", newPassword)
-		log.Println("")
-		log.Println(" All existing admin sessions have been signed out.")
-		log.Println("=========================================================")
+		fmt.Fprintln(os.Stderr, "=========================================================")
+		fmt.Fprintln(os.Stderr, " Go Load Balancer — admin password RESET (-admin-force-reset-password)")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintf(os.Stderr, "   New password: %s\n", newPassword)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, " All existing admin sessions have been signed out.")
+		fmt.Fprintln(os.Stderr, "=========================================================")
 	}
 
 	adminSrv, err := admin.NewServer(store, cpServer, auditLog, cfg.tlsCert != "", cfg.trustForwardedFor)
@@ -222,14 +244,14 @@ func startAdminServer(ctx context.Context, cpServer *controlplane.Server, cfg ad
 	go func() {
 		var serveErr error
 		if cfg.tlsCert != "" {
-			log.Printf("controlplane: admin web UI listening on %s (TLS enabled)", cfg.addr)
+			slog.Info("admin web UI listening (TLS enabled)", "component", "controlplane", "addr", cfg.addr)
 			serveErr = httpServer.ListenAndServeTLS(cfg.tlsCert, cfg.tlsKey)
 		} else {
-			log.Printf("controlplane: WARNING admin web UI listening on %s without TLS — use -admin-tls-cert/-admin-tls-key outside of local development.", cfg.addr)
+			slog.Warn("admin web UI listening without TLS - use -admin-tls-cert/-admin-tls-key outside of local development", "component", "controlplane", "addr", cfg.addr)
 			serveErr = httpServer.ListenAndServe()
 		}
 		if serveErr != nil && serveErr != http.ErrServerClosed {
-			log.Printf("controlplane: admin web UI server error: %v", serveErr)
+			slog.Error("admin web UI server error", "component", "controlplane", "error", serveErr)
 		}
 	}()
 
@@ -260,7 +282,7 @@ func buildProvider(ctx context.Context, kind string, cfg providerConfig) (pool.P
 		})
 		if cfg.simulateScaling {
 			go provider.SimulateScaling(ctx, cfg.scalingInterval, 1, 6)
-			log.Printf("controlplane: simulating scaling events every %s", cfg.scalingInterval)
+			slog.Info("simulating scaling events", "component", "controlplane", "interval", cfg.scalingInterval)
 		}
 		return provider, nil, nil
 
@@ -288,7 +310,7 @@ func buildProvider(ctx context.Context, kind string, cfg providerConfig) (pool.P
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create azure-vmss provider: %w", err)
 		}
-		log.Printf("controlplane: using azure-vmss provider for %d group(s) in resource group %q", len(groups), cfg.azureResourceGroup)
+		slog.Info("using azure-vmss provider", "component", "controlplane", "groups", len(groups), "resource_group", cfg.azureResourceGroup)
 		return provider, nil, nil
 
 	case "kubernetes":
@@ -304,7 +326,7 @@ func buildProvider(ctx context.Context, kind string, cfg providerConfig) (pool.P
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create kubernetes provider: %w", err)
 		}
-		log.Printf("controlplane: using kubernetes provider for %d group(s)", len(groups))
+		slog.Info("using kubernetes provider", "component", "controlplane", "groups", len(groups))
 		return provider, nil, nil
 
 	default:

@@ -23,9 +23,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/Josephfell/Jbalance/internal/logging"
 )
 
 // RequestIDHeader is the header carrying the request-trace ID, both
@@ -129,11 +132,21 @@ func (w *accessLogResponseWriter) Flush() {
 //     path, status, bytes, latency, client IP, group, backend, retries,
 //     and request ID.
 //
-// logger may be nil, in which case the standard logger is used. cfg
-// controls whether a log line is written and in what format.
-func AccessLogMiddleware(next http.Handler, cfg AccessLogConfig, logger *log.Logger) http.Handler {
+// logger may be nil, in which case the standard logger is used, for the
+// per-request access-log line (kept in its own JSON/text rendering for
+// stability). appLog is the process-wide structured logger; the
+// middleware stores a request-scoped child of it — tagged with the
+// request's request_id — in the request context, so any component
+// downstream (e.g. the proxy) that calls logging.FromContext(ctx) emits
+// application log lines already correlated to this request. appLog may be
+// nil, in which case the slog default is used. cfg controls whether an
+// access-log line is written and in what format.
+func AccessLogMiddleware(next http.Handler, cfg AccessLogConfig, logger *log.Logger, appLog *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = log.New(os.Stdout, "", 0)
+	}
+	if appLog == nil {
+		appLog = slog.Default()
 	}
 	format := cfg.Format
 	if format != AccessLogText {
@@ -153,6 +166,10 @@ func AccessLogMiddleware(next http.Handler, cfg AccessLogConfig, logger *log.Log
 
 		ri := &requestInfo{}
 		ctx := context.WithValue(r.Context(), requestInfoKey, ri)
+		// Correlate every application log line emitted while serving this
+		// request with its request_id, via a request-scoped logger placed
+		// in the context.
+		ctx = logging.WithContext(ctx, appLog.With(slog.String("request_id", reqID)))
 		r = r.WithContext(ctx)
 
 		alw := &accessLogResponseWriter{ResponseWriter: w}

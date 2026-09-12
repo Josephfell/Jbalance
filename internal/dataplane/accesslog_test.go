@@ -18,7 +18,7 @@ func TestAccessLogMiddleware_GeneratesAndEchoesRequestID(t *testing.T) {
 		_, _ = w.Write([]byte("hello"))
 	})
 
-	h := AccessLogMiddleware(next, AccessLogConfig{Enabled: false}, nil)
+	h := AccessLogMiddleware(next, AccessLogConfig{Enabled: false}, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	rec := httptest.NewRecorder()
@@ -45,7 +45,7 @@ func TestAccessLogMiddleware_HonoursInboundRequestID(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	h := AccessLogMiddleware(next, AccessLogConfig{Enabled: false}, nil)
+	h := AccessLogMiddleware(next, AccessLogConfig{Enabled: false}, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(RequestIDHeader, incoming)
@@ -68,7 +68,7 @@ func TestAccessLogMiddleware_JSONEntryCapturesRequest(t *testing.T) {
 		_, _ = w.Write([]byte("upstream failed"))
 	})
 
-	h := AccessLogMiddleware(next, AccessLogConfig{Enabled: true, Format: AccessLogJSON}, logger)
+	h := AccessLogMiddleware(next, AccessLogConfig{Enabled: true, Format: AccessLogJSON}, logger, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/orders", nil)
 	req.RemoteAddr = "203.0.113.7:44321"
@@ -119,7 +119,7 @@ func TestAccessLogMiddleware_PrefersXForwardedForClientIP(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	h := AccessLogMiddleware(next, AccessLogConfig{Enabled: true, Format: AccessLogJSON}, logger)
+	h := AccessLogMiddleware(next, AccessLogConfig{Enabled: true, Format: AccessLogJSON}, logger, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "10.1.1.1:9999" // the proxy in front of us
@@ -144,7 +144,7 @@ func TestAccessLogMiddleware_TextFormat(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	h := AccessLogMiddleware(next, AccessLogConfig{Enabled: true, Format: AccessLogText}, logger)
+	h := AccessLogMiddleware(next, AccessLogConfig{Enabled: true, Format: AccessLogText}, logger, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
@@ -168,7 +168,7 @@ func TestAccessLogMiddleware_Disabled_NoLine(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	h := AccessLogMiddleware(next, AccessLogConfig{Enabled: false}, logger)
+	h := AccessLogMiddleware(next, AccessLogConfig{Enabled: false}, logger, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()

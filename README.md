@@ -690,6 +690,33 @@ readinessProbe:
   periodSeconds: 5
 ```
 
+## Structured logging
+
+Both binaries log through the standard library's structured logger
+(`log/slog`), so every application log line is emitted as a consistent,
+machine-parseable record instead of an ad-hoc `printf` string. Two
+settings, shared by the control plane and the data plane, control it:
+
+| Flag | Env | Default | Values |
+|---|---|---|---|
+| `-log-level` | `LB_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `-log-format` | `LB_LOG_FORMAT` | `text` | `json`, `text` |
+
+`text` is the default so local runs stay human-readable; select `json` in
+production for a log-aggregation pipeline. Every record carries a
+`component` field (`controlplane`, `dataplane`, `pool`, `tlsutil`, …) so
+you can tell where a line came from, and application logs are written to
+**stderr** (keeping stdout free). Setting the level to `debug` turns on the
+most verbose output; `warn`/`error` quieten a noisy environment to only
+the lines that matter.
+
+The same `LB_LOG_FORMAT` choice also governs the per-request **access log**
+below, so you pick a format once and both the application log and the
+access log agree. While serving an HTTP request, the data plane threads
+that request's `X-Request-Id` (see request tracing below) into every
+application log line it emits, so an error logged deep in the proxy path
+can be correlated to the exact request that triggered it.
+
 ## Access logging and request tracing
 
 Metrics tell you how much traffic there is and how fast it is in

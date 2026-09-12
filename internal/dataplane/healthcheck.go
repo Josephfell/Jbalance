@@ -2,7 +2,7 @@ package dataplane
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -240,5 +240,5 @@ func (h *HealthChecker) markHealthy(addr string, healthy bool) {
 	if healthy {
 		state = "healthy"
 	}
-	log.Printf("dataplane: backend %s marked %s (%s probe)", addr, state, h.mode())
+	slog.Info("backend health state changed", "component", "dataplane", "backend", addr, "state", state, "probe", h.mode())
 }

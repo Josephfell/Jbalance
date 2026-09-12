@@ -3,7 +3,7 @@ package pool
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -117,7 +117,7 @@ func (p *AzureVMSSProvider) Snapshot(ctx context.Context, group string) (Snapsho
 	for _, instanceID := range runningInstanceIDs {
 		ip, ok := privateIPsByInstanceID[instanceID]
 		if !ok || ip == "" {
-			log.Printf("pool: azurevmss: instance %s in scale set %s has no private IP yet, skipping", instanceID, cfg.ScaleSetName)
+			slog.Warn("instance has no private IP yet, skipping", "component", "pool", "provider", "azure-vmss", "instance", instanceID, "scale_set", cfg.ScaleSetName)
 			continue
 		}
 		backends = append(backends, Backend{
