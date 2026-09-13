@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	pb "github.com/Josephfell/Jbalance/proto"
 )
@@ -23,17 +21,19 @@ type RouteSubscriber struct {
 	instanceID       string
 	routes           *RouteTable
 	tlsConfig        *tls.Config // nil means plaintext
+	authToken        string      // "" means no bearer-token auth
 }
 
 // NewRouteSubscriber creates a subscriber that will update the given
 // RouteTable as updates arrive from the control plane at
 // controlPlaneAddr.
-func NewRouteSubscriber(controlPlaneAddr, instanceID string, routes *RouteTable, tlsConfig *tls.Config) *RouteSubscriber {
+func NewRouteSubscriber(controlPlaneAddr, instanceID string, routes *RouteTable, tlsConfig *tls.Config, authToken string) *RouteSubscriber {
 	return &RouteSubscriber{
 		controlPlaneAddr: controlPlaneAddr,
 		instanceID:       instanceID,
 		routes:           routes,
 		tlsConfig:        tlsConfig,
+		authToken:        authToken,
 	}
 }
 
@@ -73,14 +73,7 @@ func (s *RouteSubscriber) Run(ctx context.Context) {
 }
 
 func (s *RouteSubscriber) streamOnce(ctx context.Context) (bool, error) {
-	var transportCreds credentials.TransportCredentials
-	if s.tlsConfig != nil {
-		transportCreds = credentials.NewTLS(s.tlsConfig)
-	} else {
-		transportCreds = insecure.NewCredentials()
-	}
-
-	conn, err := grpc.NewClient(s.controlPlaneAddr, grpc.WithTransportCredentials(transportCreds))
+	conn, err := grpc.NewClient(s.controlPlaneAddr, dialOptions(s.tlsConfig, s.authToken)...)
 	if err != nil {
 		return false, err
 	}

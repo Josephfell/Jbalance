@@ -64,7 +64,7 @@ func TestProxy_H2C_EndToEnd(t *testing.T) {
 	defer cancel()
 
 	routes := NewRouteTable("web-tier")
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil,
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "",
 		HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
 	groups.Ensure("web-tier").Update(&pb.BackendSet{
 		Group: "web-tier", Version: 1,
@@ -101,7 +101,7 @@ func TestProxy_H2C_ConfigSelectsTransport(t *testing.T) {
 	routes := NewRouteTable("g")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp", nil,
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp", nil, "",
 		HealthCheckConfig{Interval: time.Hour, Timeout: time.Second}, time.Hour)
 
 	if p := NewProxy(routes, groups, nil, ProxyConfig{}); p.rp.Transport == nil {

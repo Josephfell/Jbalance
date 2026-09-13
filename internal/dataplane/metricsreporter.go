@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	pb "github.com/Josephfell/Jbalance/proto"
 )
@@ -26,17 +24,19 @@ type MetricsReporter struct {
 	instanceID       string
 	metrics          *Metrics
 	tlsConfig        *tls.Config // nil means plaintext
+	authToken        string      // "" means no bearer-token auth
 	interval         time.Duration
 }
 
 // NewMetricsReporter creates a reporter that sends metrics to the control
 // plane at controlPlaneAddr every interval.
-func NewMetricsReporter(controlPlaneAddr, instanceID string, metrics *Metrics, tlsConfig *tls.Config, interval time.Duration) *MetricsReporter {
+func NewMetricsReporter(controlPlaneAddr, instanceID string, metrics *Metrics, tlsConfig *tls.Config, authToken string, interval time.Duration) *MetricsReporter {
 	return &MetricsReporter{
 		controlPlaneAddr: controlPlaneAddr,
 		instanceID:       instanceID,
 		metrics:          metrics,
 		tlsConfig:        tlsConfig,
+		authToken:        authToken,
 		interval:         interval,
 	}
 }
@@ -46,14 +46,7 @@ func NewMetricsReporter(controlPlaneAddr, instanceID string, metrics *Metrics, t
 // next tick rather than treated as fatal — reporting metrics is an
 // observability nice-to-have, never a reason to stop proxying traffic.
 func (r *MetricsReporter) Run(ctx context.Context) {
-	var transportCreds credentials.TransportCredentials
-	if r.tlsConfig != nil {
-		transportCreds = credentials.NewTLS(r.tlsConfig)
-	} else {
-		transportCreds = insecure.NewCredentials()
-	}
-
-	conn, err := grpc.NewClient(r.controlPlaneAddr, grpc.WithTransportCredentials(transportCreds))
+	conn, err := grpc.NewClient(r.controlPlaneAddr, dialOptions(r.tlsConfig, r.authToken)...)
 	if err != nil {
 		slog.Error("metrics reporter failed to create client", "component", "dataplane", "error", err)
 		return

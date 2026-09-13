@@ -34,7 +34,7 @@ func TestProxy_RoutesToDefaultGroupWithNoRoutes(t *testing.T) {
 	defer cleanup()
 
 	routes := NewRouteTable("web-tier")
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
 	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: addr, Weight: 1}}})
 
 	proxy := NewProxy(routes, groups, nil, ProxyConfig{})
@@ -64,7 +64,7 @@ func TestProxy_RoutesByPathPrefix(t *testing.T) {
 		{PathPrefix: "/api/", TargetGroup: "api-tier"},
 	}})
 
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
 	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: webAddr, Weight: 1}}})
 	groups.Ensure("api-tier").Update(&pb.BackendSet{Group: "api-tier", Version: 1, Backends: []*pb.Backend{{Address: apiAddr, Weight: 1}}})
 
@@ -98,7 +98,7 @@ func TestProxy_RoutesByHost(t *testing.T) {
 		{Host: "static.acme.io", PathPrefix: "/", TargetGroup: "static-edge"},
 	}})
 
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
 	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: webAddr, Weight: 1}}})
 	groups.Ensure("static-edge").Update(&pb.BackendSet{Group: "static-edge", Version: 1, Backends: []*pb.Backend{{Address: staticAddr, Weight: 1}}})
 
@@ -120,7 +120,7 @@ func TestProxy_ReturnsServiceUnavailableWhenResolvedGroupHasNoBackends(t *testin
 	defer cancel()
 
 	routes := NewRouteTable("web-tier")
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
 	// Deliberately never call Update — the group exists but has no backends.
 	groups.Ensure("web-tier")
 
@@ -145,7 +145,7 @@ func TestProxy_LazilyEnsuresGroupReferencedOnlyByARoute(t *testing.T) {
 		{PathPrefix: "/api/", TargetGroup: "api-tier"},
 	}})
 
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
 	// api-tier was never explicitly Ensure()'d before the request — the
 	// proxy's own call to groups.Ensure inside Handler must create it on
 	// demand. Populate its backends only after constructing the proxy, to
@@ -172,7 +172,7 @@ func TestProxy_StickySessions_PinsToSameBackendAcrossRequests(t *testing.T) {
 	defer cleanupB()
 
 	routes := NewRouteTable("web-tier")
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{
 		Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 	}, time.Hour)
 	groups.Ensure("web-tier").Update(&pb.BackendSet{
@@ -222,7 +222,7 @@ func TestProxy_StickySessions_FallsBackWhenPinnedBackendUnhealthy(t *testing.T) 
 	defer cleanupB()
 
 	routes := NewRouteTable("web-tier")
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{
 		Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 	}, time.Hour)
 	backends := groups.Ensure("web-tier")
@@ -269,7 +269,7 @@ func TestProxy_StickySessions_ForgedCookieCannotEscapeGroup(t *testing.T) {
 	defer cleanupA()
 
 	routes := NewRouteTable("web-tier")
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{
 		Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 	}, time.Hour)
 	groups.Ensure("web-tier").Update(&pb.BackendSet{
@@ -301,7 +301,7 @@ func TestProxy_NoStickyCookieSetWhenDisabled(t *testing.T) {
 	defer cleanup()
 
 	routes := NewRouteTable("web-tier")
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{
 		Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 	}, time.Hour)
 	groups.Ensure("web-tier").Update(&pb.BackendSet{
@@ -344,7 +344,7 @@ func TestProxy_RetriesPastDeadBackend(t *testing.T) {
 	dead := deadBackendAddr(t)
 
 	routes := NewRouteTable("web-tier")
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
 	// Dead backend listed first; with round-robin the first attempt hits
 	// it, and a retry must fall through to the live one.
 	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{
@@ -376,7 +376,7 @@ func TestProxy_NoRetryReturnsBadGatewayOnDeadBackend(t *testing.T) {
 	dead := deadBackendAddr(t)
 
 	routes := NewRouteTable("web-tier")
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
 	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: dead, Weight: 1}}})
 
 	// MaxRetries=0: a single attempt against the only (dead) backend
@@ -396,7 +396,7 @@ func TestProxy_DoesNotRetryPOST(t *testing.T) {
 	dead := deadBackendAddr(t)
 
 	routes := NewRouteTable("web-tier")
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
 	// Only the dead backend, so a POST that (correctly) does NOT retry
 	// must fail with 502.
 	groups.Ensure("web-tier").Update(&pb.BackendSet{Group: "web-tier", Version: 1, Backends: []*pb.Backend{{Address: dead, Weight: 1}}})

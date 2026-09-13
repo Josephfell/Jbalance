@@ -47,6 +47,7 @@ type GroupManager struct {
 	controlPlaneAddr     string
 	instanceID           string
 	tlsConfig            *tls.Config
+	authToken            string
 	healthCfg            HealthCheckConfig
 	healthReportInterval time.Duration
 
@@ -66,12 +67,13 @@ type GroupManager struct {
 // the lifetime of every group's background goroutines — it should be the
 // data plane process's own long-lived context, cancelled only on
 // shutdown.
-func NewGroupManager(baseCtx context.Context, controlPlaneAddr, instanceID string, tlsConfig *tls.Config, healthCfg HealthCheckConfig, healthReportInterval time.Duration) *GroupManager {
+func NewGroupManager(baseCtx context.Context, controlPlaneAddr, instanceID string, tlsConfig *tls.Config, authToken string, healthCfg HealthCheckConfig, healthReportInterval time.Duration) *GroupManager {
 	return &GroupManager{
 		baseCtx:              baseCtx,
 		controlPlaneAddr:     controlPlaneAddr,
 		instanceID:           instanceID,
 		tlsConfig:            tlsConfig,
+		authToken:            authToken,
 		healthCfg:            healthCfg,
 		healthReportInterval: healthReportInterval,
 		groups:               make(map[string]*BackendList),
@@ -116,7 +118,7 @@ func (m *GroupManager) Ensure(group string) *BackendList {
 	bl.SetOutlierConfig(m.outlierCfg)
 	m.groups[group] = bl
 
-	sub := NewSubscriber(m.controlPlaneAddr, group, m.instanceID, bl, m.tlsConfig)
+	sub := NewSubscriber(m.controlPlaneAddr, group, m.instanceID, bl, m.tlsConfig, m.authToken)
 	go sub.Run(m.baseCtx)
 
 	checker := NewHealthChecker(bl)
@@ -131,7 +133,7 @@ func (m *GroupManager) Ensure(group string) *BackendList {
 	checker.HTTPHost = m.healthCfg.HTTPHost
 	go checker.Run(m.baseCtx)
 
-	reporter := NewHealthReporter(m.controlPlaneAddr, group, m.instanceID, bl, m.tlsConfig, m.healthReportInterval)
+	reporter := NewHealthReporter(m.controlPlaneAddr, group, m.instanceID, bl, m.tlsConfig, m.authToken, m.healthReportInterval)
 	go reporter.Run(m.baseCtx)
 
 	slog.Info("started subscription for newly referenced group", "component", "dataplane", "group", group)

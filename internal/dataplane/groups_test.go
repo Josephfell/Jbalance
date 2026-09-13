@@ -14,7 +14,7 @@ func TestGroupManager_EnsureReturnsSameBackendListForSameGroup(t *testing.T) {
 	// here — Ensure's contract under test is "returns a stable BackendList
 	// per group name", not "successfully subscribes"; Subscriber.Run
 	// handles connection failure on its own via backoff/retry.
-	gm := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{
+	gm := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{
 		Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 	}, time.Hour)
 
@@ -29,7 +29,7 @@ func TestGroupManager_EnsureReturnsDistinctBackendListsForDifferentGroups(t *tes
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	gm := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{
+	gm := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{
 		Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 	}, time.Hour)
 
@@ -44,7 +44,7 @@ func TestGroupManager_GroupsListsEveryEnsuredGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	gm := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{
+	gm := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{
 		Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 	}, time.Hour)
 
@@ -69,7 +69,7 @@ func TestGroupManager_GroupsEmptyBeforeAnyEnsure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	gm := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
+	gm := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2}, time.Hour)
 	if got := gm.Groups(); len(got) != 0 {
 		t.Errorf("expected no tracked groups before any Ensure call, got %v", got)
 	}
