@@ -976,6 +976,23 @@ real deployment. For a real Docker Compose deployment, wire in a
 provider, or other containers on the same Compose network by service
 name).
 
+**Container hardening.** Both images are built to production-hardening
+defaults:
+
+- **Non-root user.** Each container creates an unprivileged `app` user and
+  runs the binary as it (`USER app`) rather than as root. The control
+  plane's admin store directory (`/var/lib/go-loadbalancer`) is chowned to
+  that user so the process can still persist the admin password.
+- **Static, stripped binaries.** `CGO_ENABLED=0` with `-ldflags="-s -w"`
+  produces a static binary with no symbol table, keeping the runtime layer
+  small.
+- **`HEALTHCHECK`.** The data plane's healthcheck probes its own ops
+  listener (`/healthz` on `:9101`, works in both `http` and `tcp` modes).
+  The control plane exposes no unauthenticated HTTP probe surface (its
+  admin UI is login-gated), so its healthcheck is a TCP connect check
+  against the gRPC listener (`:9090`) — the process is healthy while it is
+  accepting connections.
+
 ## Known limitations (by design, for now)
 
 - No connection draining delay when a backend is removed by the pool
