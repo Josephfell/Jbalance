@@ -1032,6 +1032,29 @@ defaults:
   against the gRPC listener (`:9090`) — the process is healthy while it is
   accepting connections.
 
+**Published images.** A `Publish images` GitHub Actions workflow
+(`.github/workflows/publish.yml`) builds both images and pushes them to the
+GitHub Container Registry (`ghcr.io`) — no Docker Hub account or manually
+managed registry secret needed, it authenticates with the workflow's
+automatic `GITHUB_TOKEN`. Cutting a version tag publishes release images:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+produces, for each binary:
+
+```
+ghcr.io/<owner>/jbalance-controlplane:v1.0.0   (also :1.0, :1, :latest)
+ghcr.io/<owner>/jbalance-dataplane:v1.0.0      (also :1.0, :1, :latest)
+```
+
+A manual run (Actions → Publish images → *Run workflow*) instead publishes
+an ad-hoc image tagged with the branch name and short commit SHA, without
+applying `:latest` — handy for a test build off a branch. Pull with
+`docker pull ghcr.io/<owner>/jbalance-dataplane:v1.0.0`.
+
 ## Known limitations (by design, for now)
 
 - No connection draining delay when a backend is removed by the pool
