@@ -958,6 +958,39 @@ file for local development: an explicit `LB_K8S_KUBECONFIG` path if set,
 otherwise the standard loading rules (`KUBECONFIG` env, then the default
 kubeconfig location).
 
+## File backend provider
+
+For a deployment that isn't on Azure or Kubernetes — a fixed fleet, a
+service registry that can render a file, or anything you'd rather manage by
+hand or by config management — `pool.FileProvider` reads the backend list
+from a local YAML file.
+
+```bash
+export LB_PROVIDER=file
+export LB_FILE_PROVIDER_PATH=/etc/go-loadbalancer/backends.yaml
+go run ./cmd/controlplane
+```
+
+The file maps each group to its backends:
+
+```yaml
+groups:
+  web-tier:
+    - address: 10.0.0.1:8080
+      weight: 2          # relative weight; omit for the default (1)
+    - address: 10.0.0.2:8080
+  api-tier:
+    - address: 10.0.1.1:9090
+```
+
+**Hot-reload.** The file's modification time is checked on every reconcile
+tick; when it changes, the file is re-read and the new backend set is
+pushed to data planes just like a scaling event from a cloud provider — no
+restart. Reloads are **fail-safe**: if a reload can't parse (a half-written
+file mid-edit), the previously-loaded backends keep serving rather than the
+group going empty. A missing or malformed file at startup fails fast with a
+clear error.
+
 ## Adding a different backend pool provider
 
 To back the control plane with something other than the fake, Azure VMSS,
