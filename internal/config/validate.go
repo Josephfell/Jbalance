@@ -388,6 +388,9 @@ type ControlPlaneConfig struct {
 	K8sGroups     string
 	K8sKubeconfig string
 
+	// file provider
+	FileProviderPath string
+
 	AdminTLSCert string
 	AdminTLSKey  string
 
@@ -401,7 +404,7 @@ type ControlPlaneConfig struct {
 func ValidateControlPlane(c ControlPlaneConfig) error {
 	var p problems
 
-	p.checkOneOf("-provider (LB_PROVIDER)", c.Provider, "fake", "azure-vmss", "kubernetes")
+	p.checkOneOf("-provider (LB_PROVIDER)", c.Provider, "fake", "file", "azure-vmss", "kubernetes")
 	p.checkOneOf("-log-level (LB_LOG_LEVEL)", c.LogLevel, "debug", "info", "warn", "error")
 	p.checkOneOf("-log-format (LB_LOG_FORMAT)", c.LogFormat, "json", "text")
 
@@ -456,6 +459,10 @@ func ValidateControlPlane(c ControlPlaneConfig) error {
 	case "kubernetes":
 		if strings.TrimSpace(c.K8sGroups) == "" {
 			p.addf("-k8s-groups (LB_K8S_GROUPS) must specify at least one group for the kubernetes provider")
+		}
+	case "file":
+		if strings.TrimSpace(c.FileProviderPath) == "" {
+			p.addf("-file-provider-path (LB_FILE_PROVIDER_PATH) is required for the file provider")
 		}
 	}
 

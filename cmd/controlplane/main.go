@@ -53,7 +53,7 @@ func main() {
 
 	authToken := flag.String("control-plane-auth-token", envflag.String("LB_CONTROL_PLANE_AUTH_TOKEN", ""), "shared bearer token required on the gRPC control API; data planes must present the same token via -control-plane-auth-token. If unset, the API is unauthenticated (any client that can reach it gets full access). Send it over TLS (-tls-cert) so the token is not exposed in cleartext [env: LB_CONTROL_PLANE_AUTH_TOKEN]")
 
-	providerKind := flag.String("provider", envflag.String("LB_PROVIDER", "fake"), "backend pool provider to use: 'fake' (local testing), 'azure-vmss', or 'kubernetes' [env: LB_PROVIDER]")
+	providerKind := flag.String("provider", envflag.String("LB_PROVIDER", "fake"), "backend pool provider to use: 'fake' (local testing), 'file' (YAML file), 'azure-vmss', or 'kubernetes' [env: LB_PROVIDER]")
 
 	// Fake provider settings.
 	simulateScaling := flag.Bool("simulate-scaling", envflag.Bool("LB_SIMULATE_SCALING", true), "(fake provider only) randomly add/remove backends on a timer to simulate scaling events [env: LB_SIMULATE_SCALING]")
@@ -68,6 +68,9 @@ func main() {
 	// Kubernetes provider settings.
 	k8sGroups := flag.String("k8s-groups", envflag.String("LB_K8S_GROUPS", ""), "(kubernetes provider only) comma-separated group specs: group:namespace:service:port[:weight], e.g. 'web-tier:default:web:8080,api-tier:default:api:8081' [env: LB_K8S_GROUPS]")
 	k8sKubeconfig := flag.String("k8s-kubeconfig", envflag.String("LB_K8S_KUBECONFIG", ""), "(kubernetes provider only) explicit path to a kubeconfig file; if unset, uses in-cluster config when running as a pod, otherwise the default kubeconfig (KUBECONFIG env, then ~/.kube/config) [env: LB_K8S_KUBECONFIG]")
+
+	// File provider settings.
+	fileProviderPath := flag.String("file-provider-path", envflag.String("LB_FILE_PROVIDER_PATH", ""), "(file provider only) path to a YAML file listing groups and their backends; re-read on change [env: LB_FILE_PROVIDER_PATH]")
 
 	// Admin web UI settings.
 	adminAddr := flag.String("admin-addr", envflag.String("LB_ADMIN_ADDR", ":9091"), "address for the admin web management UI to listen on [env: LB_ADMIN_ADDR]")
@@ -115,6 +118,8 @@ func main() {
 		K8sGroups:     *k8sGroups,
 		K8sKubeconfig: *k8sKubeconfig,
 
+		FileProviderPath: *fileProviderPath,
+
 		AdminTLSCert: *adminTLSCert,
 		AdminTLSKey:  *adminTLSKey,
 
@@ -143,6 +148,8 @@ func main() {
 
 		k8sGroups:     *k8sGroups,
 		k8sKubeconfig: *k8sKubeconfig,
+
+		fileProviderPath: *fileProviderPath,
 	})
 	if err != nil {
 		fatal("startup error", "error", err)
@@ -318,6 +325,8 @@ type providerConfig struct {
 
 	k8sGroups     string
 	k8sKubeconfig string
+
+	fileProviderPath string
 }
 
 // buildProvider constructs the configured pool.Provider. The returned
@@ -360,6 +369,14 @@ func buildProvider(ctx context.Context, kind string, cfg providerConfig) (pool.P
 			return nil, nil, fmt.Errorf("failed to create azure-vmss provider: %w", err)
 		}
 		slog.Info("using azure-vmss provider", "component", "controlplane", "groups", len(groups), "resource_group", cfg.azureResourceGroup)
+		return provider, nil, nil
+
+	case "file":
+		provider, err := pool.NewFileProvider(cfg.fileProviderPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create file provider: %w", err)
+		}
+		slog.Info("using file provider", "component", "controlplane", "path", cfg.fileProviderPath)
 		return provider, nil, nil
 
 	case "kubernetes":
