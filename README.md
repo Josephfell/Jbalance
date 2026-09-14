@@ -10,9 +10,15 @@ xDS, Istio) use:
 - **Data plane** (`cmd/dataplane`) is a "dumb" proxy that runs in one of two
   modes, selected by `-protocol`:
   - **`http`** (default): an L7 reverse proxy. Every instance has a default
-    backend group (`-group`), but can route different requests (by host,
-    path prefix, and/or method) to other groups per the control plane's L7
-    route table, and supports cookie-based sticky sessions per group.
+    backend group (`-group`), but a global route table can send different
+    requests (by host, path prefix, and/or method) to other groups —
+    including weighted **canary splits** — and per matched route can
+    **rewrite** the request (strip/add a path prefix, set/remove headers)
+    and require **edge authentication** (API key or JWT) before proxying.
+    It also does cookie-based sticky sessions and per-client rate limiting
+    per group, handles **WebSocket upgrades and SSE/streaming** natively,
+    proxies **gRPC/HTTP2 (h2c)** backends, and can emit **OpenTelemetry**
+    traces.
   - **`tcp`**: an L4 raw proxy that forwards bytes bidirectionally to a
     single backend group, for non-HTTP protocols (databases, custom TCP
     services, TLS passthrough). No routing or sticky sessions — a TCP
@@ -23,14 +29,19 @@ xDS, Istio) use:
   recently pushed for the resolved group, using whichever load-balancing
   algorithm (weighted round robin, least connections, or random) the
   control plane has selected for that group. Health checking (TCP
-  connect probes), health reporting to the admin UI, and the control
-  plane's push model work identically in both modes, since they're
+  connect or HTTP probes), passive outlier detection, TLS termination
+  (with SNI + hot-reload), health reporting to the admin UI, and the
+  control plane's push model work identically in both modes, since they're
   protocol-agnostic to begin with.
 
-This split means the control plane's backend-discovery logic (today: a fake
-provider; eventually: Azure VMSS, vCenter, etc.) is completely decoupled
-from the proxying logic. Swapping in a real cloud provider means
-implementing one small interface (`pool.Provider`) — nothing else changes.
+This split means the control plane's backend-discovery logic is completely
+decoupled from the proxying logic. Real providers are included today —
+**Azure VMSS**, **Kubernetes** (EndpointSlices), and a **file** (YAML)
+provider — alongside a fake provider for local testing; swapping in another
+source (vCenter, a different cloud, a service registry) means implementing
+one small interface (`pool.Provider`), and nothing else changes. The
+control plane's own admin state persists to local JSON by default, or to a
+shared **Postgres** database so multiple control-plane replicas can run HA.
 
 ## Why this design
 
@@ -100,9 +111,16 @@ currently reports for `web-tier`.
 ```
 cmd/controlplane/   entrypoint for the control plane binary
 cmd/dataplane/       entrypoint for the data plane (proxy) binary
-internal/pool/       backend pool Provider interface + fake/testing impl
-internal/controlplane/  gRPC server: reconciliation loop + subscriber fan-out
-internal/dataplane/  gRPC client, weighted backend list, HTTP reverse proxy
+internal/pool/       backend pool Provider interface + fake, azure-vmss,
+                     kubernetes, and file (YAML) implementations
+internal/controlplane/  gRPC server: reconciliation loop + subscriber
+                     fan-out, admin web UI + state stores (JSON/Postgres)
+internal/dataplane/  gRPC client, weighted backend list, HTTP reverse proxy,
+                     L7 router/rewrite, edge auth, health checking
+internal/grpcauth/   bearer-token auth for the control-plane gRPC API
+internal/tracing/    OpenTelemetry (OTLP) tracing setup + middleware
+internal/config/     startup configuration validation (fail-fast)
+internal/{logging,tlsutil,envflag}/  shared logging, TLS, env-flag helpers
 proto/               gRPC service definition + generated Go stubs
 scripts/             manual-testing helpers, not part of the main build:
                      fake_backend.go (plain HTTP), echo_backend/ (plain TCP,

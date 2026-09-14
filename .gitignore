@@ -4,3 +4,9 @@
 *.out
 .DS_Store
 .env
+
+# Kiro CLI local settings — editor/agent tooling, not part of the project.
+.kiro/
+
+# Large standalone console export — a generated artifact, not source.
+jbalance Console (standalone).html
