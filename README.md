@@ -883,6 +883,36 @@ configured by flag/env rather than from the admin UI. It applies to `http`
 mode only — an L4/`tcp` proxy has no request boundaries to log within a
 connection (the existing connection-level metrics cover that layer).
 
+## Distributed tracing (OpenTelemetry)
+
+Where the access log records one line per request and metrics aggregate
+traffic, **distributed tracing** follows a single request across hops —
+client → this proxy → backend — as one correlated trace in Jaeger, Tempo,
+Datadog, or any OTLP-compatible backend. It is **opt-in** and `http`-mode
+only; disabled, it adds negligible overhead.
+
+Enable it with `-tracing` (`LB_TRACING=true`). Each proxied request then
+becomes a span. An inbound **W3C `traceparent`** header is honoured (so a
+trace started at an upstream edge/CDN continues through this hop), and the
+context is propagated to the backend — complementary to the always-on
+`X-Request-Id` correlation, not a replacement for it.
+
+Settings (all flags/env, per-instance):
+
+- `LB_TRACING_ENDPOINT` — OTLP collector `host:port` (e.g. `localhost:4317`
+  for gRPC, `localhost:4318` for HTTP). Unset uses the OTLP SDK's own
+  default/`OTEL_EXPORTER_OTLP_*` environment.
+- `LB_TRACING_PROTOCOL` — `grpc` (default) or `http`.
+- `LB_TRACING_INSECURE` — send OTLP over plaintext (no TLS) to the collector.
+- `LB_TRACING_SAMPLE_RATIO` — head-based sampling ratio in `[0,1]` (default
+  `1` = every request; parent sampling decisions are always respected).
+- `LB_TRACING_SERVICE_NAME` — the `service.name` on emitted spans (default
+  `jbalance-dataplane`).
+
+```bash
+go run ./cmd/dataplane -tracing -tracing-endpoint=localhost:4317 -tracing-insecure
+```
+
 ## Azure VMSS provider
 
 A real backend pool provider is included: `pool.AzureVMSSProvider` reports

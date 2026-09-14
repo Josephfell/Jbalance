@@ -62,6 +62,20 @@ func Int64(key string, fallback int64) int64 {
 	return parsed
 }
 
+// Float64 returns the parsed float64 value of the given environment
+// variable, or fallback if it's unset, empty, or not a valid float.
+func Float64(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
 // Duration returns the parsed time.Duration value of the given environment
 // variable (e.g. "5s", "2m"), or fallback if it's unset, empty, or not a
 // valid duration.

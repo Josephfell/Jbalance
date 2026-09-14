@@ -201,6 +201,10 @@ type DataPlaneConfig struct {
 	AccessLog       bool
 	AccessLogFormat string
 
+	TracingEnabled     bool
+	TracingProtocol    string
+	TracingSampleRatio float64
+
 	ProxyConnectTimeout  time.Duration
 	ProxyResponseTimeout time.Duration
 	ProxyMaxRetries      int
@@ -249,6 +253,12 @@ func ValidateDataPlane(c DataPlaneConfig) error {
 	p.checkOneOf("-health-check-scheme (LB_HEALTH_CHECK_SCHEME)", c.HealthCheckScheme, "http", "https")
 	p.checkOneOf("-backend-protocol (LB_BACKEND_PROTOCOL)", c.BackendProtocol, "http1", "h2c")
 	p.checkOneOf("-access-log-format (LB_ACCESS_LOG_FORMAT)", c.AccessLogFormat, "json", "text")
+	if c.TracingEnabled {
+		p.checkOneOf("-tracing-protocol (LB_TRACING_PROTOCOL)", c.TracingProtocol, "grpc", "http")
+		if c.TracingSampleRatio < 0 || c.TracingSampleRatio > 1 {
+			p.addf("-tracing-sample-ratio (LB_TRACING_SAMPLE_RATIO) must be in [0,1] (got %v)", c.TracingSampleRatio)
+		}
+	}
 	p.checkOneOf("-log-level (LB_LOG_LEVEL)", c.LogLevel, "debug", "info", "warn", "error")
 	p.checkOneOf("-log-format (LB_LOG_FORMAT)", c.LogFormat, "json", "text")
 

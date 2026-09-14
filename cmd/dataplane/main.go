@@ -36,6 +36,7 @@ import (
 	"github.com/Josephfell/Jbalance/internal/envflag"
 	"github.com/Josephfell/Jbalance/internal/logging"
 	"github.com/Josephfell/Jbalance/internal/tlsutil"
+	"github.com/Josephfell/Jbalance/internal/tracing"
 )
 
 // fatal logs a fatal error via slog (so the message obeys the configured
@@ -92,6 +93,13 @@ func main() {
 	accessLog := flag.Bool("access-log", envflag.Bool("LB_ACCESS_LOG", false), "(http mode) write one structured access-log line per proxied request (method, path, status, latency, chosen backend, request ID) [env: LB_ACCESS_LOG]")
 	accessLogFormat := flag.String("access-log-format", envflag.String("LB_ACCESS_LOG_FORMAT", "json"), "(http mode) access-log line format: 'json' or 'text' [env: LB_ACCESS_LOG_FORMAT]")
 
+	tracingEnabled := flag.Bool("tracing", envflag.Bool("LB_TRACING", false), "(http mode) enable OpenTelemetry distributed tracing: emit a span per proxied request and propagate W3C traceparent to the backend [env: LB_TRACING]")
+	tracingEndpoint := flag.String("tracing-endpoint", envflag.String("LB_TRACING_ENDPOINT", ""), "OTLP collector endpoint (host:port), e.g. localhost:4317 (grpc) or localhost:4318 (http); if unset the OTLP SDK's own default/env is used [env: LB_TRACING_ENDPOINT]")
+	tracingProtocol := flag.String("tracing-protocol", envflag.String("LB_TRACING_PROTOCOL", "grpc"), "OTLP transport for traces: 'grpc' or 'http' [env: LB_TRACING_PROTOCOL]")
+	tracingInsecure := flag.Bool("tracing-insecure", envflag.Bool("LB_TRACING_INSECURE", false), "send OTLP traces over plaintext (no TLS) to the collector [env: LB_TRACING_INSECURE]")
+	tracingSampleRatio := flag.Float64("tracing-sample-ratio", envflag.Float64("LB_TRACING_SAMPLE_RATIO", 1), "head-based trace sampling ratio in [0,1]; 1 samples every request, 0 none [env: LB_TRACING_SAMPLE_RATIO]")
+	tracingServiceName := flag.String("tracing-service-name", envflag.String("LB_TRACING_SERVICE_NAME", "jbalance-dataplane"), "service.name resource attribute reported on emitted spans [env: LB_TRACING_SERVICE_NAME]")
+
 	outlierDetection := flag.Bool("outlier-detection", envflag.Bool("LB_OUTLIER_DETECTION", false), "enable passive outlier detection: eject a backend from rotation after a run of errors on real traffic, then re-admit it after a cooldown (complements active health checks) [env: LB_OUTLIER_DETECTION]")
 	outlierConsecutiveErrors := flag.Int("outlier-consecutive-errors", envflag.Int("LB_OUTLIER_CONSECUTIVE_ERRORS", 5), "consecutive real-traffic errors (connection failure or 5xx) against one backend before it is passively ejected [env: LB_OUTLIER_CONSECUTIVE_ERRORS]")
 	outlierEjectDuration := flag.Duration("outlier-eject-duration", envflag.Duration("LB_OUTLIER_EJECT_DURATION", 30*time.Second), "base cooldown a passively-ejected backend stays out of rotation; repeated ejections back off linearly up to -outlier-max-eject-duration [env: LB_OUTLIER_EJECT_DURATION]")
@@ -145,6 +153,10 @@ func main() {
 		AccessLog:       *accessLog,
 		AccessLogFormat: *accessLogFormat,
 
+		TracingEnabled:     *tracingEnabled,
+		TracingProtocol:    *tracingProtocol,
+		TracingSampleRatio: *tracingSampleRatio,
+
 		ProxyConnectTimeout:  *proxyConnectTimeout,
 		ProxyResponseTimeout: *proxyResponseTimeout,
 		ProxyMaxRetries:      *proxyMaxRetries,
@@ -197,6 +209,28 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Configure OpenTelemetry tracing (no-op unless -tracing is set). The
+	// shutdown func flushes the exporter on process exit.
+	tracingShutdown, err := tracing.Setup(ctx, tracing.Config{
+		Enabled:     *tracingEnabled,
+		Endpoint:    *tracingEndpoint,
+		Protocol:    *tracingProtocol,
+		Insecure:    *tracingInsecure,
+		ServiceName: *tracingServiceName,
+		SampleRatio: *tracingSampleRatio,
+	})
+	if err != nil {
+		fatal("failed to set up tracing", "error", err)
+	}
+	defer func() {
+		if err := tracingShutdown(context.Background()); err != nil {
+			slog.Warn("tracing shutdown error", "component", "dataplane", "error", err)
+		}
+	}()
+	if *tracingEnabled {
+		slog.Info("distributed tracing enabled", "component", "dataplane", "protocol", *tracingProtocol, "endpoint", *tracingEndpoint)
+	}
 
 	var cpTLSConfig *tls.Config
 	if *cpTLSEnable {
@@ -371,7 +405,12 @@ func main() {
 	handler = dataplane.MaxBodyMiddleware(handler, *maxBodyBytes)
 	handler = dataplane.MaxConnsMiddleware(handler, *maxConns)
 	handler = dataplane.RecoveryMiddleware(handler, *group, metrics)
-	mux.Handle("/", dataplane.AccessLogMiddleware(handler, accessLogCfg, nil, logger))
+	// Tracing sits OUTERMOST so the request span covers the whole chain and
+	// the trace context (from an inbound traceparent, or freshly created) is
+	// available to every inner middleware and propagated to the backend.
+	// It is a near-no-op when tracing is disabled.
+	tracedChain := tracing.Middleware(dataplane.AccessLogMiddleware(handler, accessLogCfg, nil, logger))
+	mux.Handle("/", tracedChain)
 	if *maxConns > 0 {
 		slog.Info("max concurrent connections limit enabled", "component", "dataplane", "max_conns", *maxConns)
 	}
