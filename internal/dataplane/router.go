@@ -25,6 +25,9 @@ type route struct {
 	// rewrite holds optional request/response transformations applied
 	// when this rule matches. Zero value is a no-op.
 	rewrite routeRewrite
+	// auth, when enabled, requires the matched request to authenticate
+	// (API key or JWT) before it is proxied. Zero value = open route.
+	auth routeAuth
 }
 
 // routeRewrite is the data plane's local form of pb.RouteRewrite.
@@ -137,6 +140,7 @@ func (t *RouteTable) Update(table *pb.RouteTable) {
 			targetGroup: r.TargetGroup,
 			split:       split,
 			rewrite:     rewriteFromProto(r.Rewrite),
+			auth:        authFromProto(r.Auth),
 		})
 	}
 	t.routes = routes
@@ -149,7 +153,7 @@ func (t *RouteTable) Update(table *pb.RouteTable) {
 // split — one of the split targets chosen by weight. Falls back to the
 // data plane's default group if no rule matches.
 func (t *RouteTable) Resolve(host, path, method string) string {
-	group, _ := t.ResolveRoute(host, path, method)
+	group, _, _ := t.resolveMatch(host, path, method)
 	return group
 }
 
@@ -157,6 +161,22 @@ func (t *RouteTable) Resolve(host, path, method string) string {
 // rewrite is the zero value (a no-op) when no rule matched or the matched
 // rule configured no rewrites.
 func (t *RouteTable) ResolveRoute(host, path, method string) (string, routeRewrite) {
+	group, rw, _ := t.resolveMatch(host, path, method)
+	return group, rw
+}
+
+// ResolveWithAuth is Resolve plus the matched rule's edge-auth policy. The
+// returned routeAuth is the zero value (open) when no rule matched or the
+// matched rule configured no auth.
+func (t *RouteTable) ResolveWithAuth(host, path, method string) (string, routeAuth) {
+	group, _, auth := t.resolveMatch(host, path, method)
+	return group, auth
+}
+
+// resolveMatch resolves host/path/method to a target group plus the
+// matched rule's rewrite and auth policies (both zero when no rule
+// matched). Single matching path shared by all three resolve methods.
+func (t *RouteTable) resolveMatch(host, path, method string) (string, routeRewrite, routeAuth) {
 	t.mu.RLock()
 	var matched *route
 	for i := range t.routes {
@@ -165,10 +185,12 @@ func (t *RouteTable) ResolveRoute(host, path, method string) (string, routeRewri
 			break
 		}
 	}
-	group := ""
+	group := t.defaultGroup
 	var rw routeRewrite
+	var auth routeAuth
 	if matched != nil {
 		rw = matched.rewrite
+		auth = matched.auth
 		if len(matched.split) == 0 {
 			group = matched.targetGroup
 		} else {
@@ -176,11 +198,7 @@ func (t *RouteTable) ResolveRoute(host, path, method string) (string, routeRewri
 		}
 	}
 	t.mu.RUnlock()
-
-	if matched == nil {
-		return t.defaultGroup, routeRewrite{}
-	}
-	return group, rw
+	return group, rw, auth
 }
 
 // rewriteFromProto converts a pb.RouteRewrite (possibly nil) into the

@@ -382,6 +382,7 @@ type routeRow struct {
 	Name        string
 	StripPrefix string
 	ReqHeaders  string
+	Auth        string
 }
 
 func routesToRows(routes []controlplane.Route) []routeRow {
@@ -398,6 +399,7 @@ func routesToRows(routes []controlplane.Route) []routeRow {
 			Name:        r.Name,
 			StripPrefix: strip,
 			ReqHeaders:  reqHdrs,
+			Auth:        formatAuth(r.Auth),
 		}
 	}
 	return rows
@@ -464,6 +466,7 @@ func (s *Server) handleRoutesSubmit(w http.ResponseWriter, r *http.Request) {
 	splits := r.Form["split"]
 	stripPrefixes := r.Form["strip_prefix"]
 	reqHeaders := r.Form["req_headers"]
+	auths := r.Form["auth"]
 
 	n := len(hosts)
 	type indexed struct {
@@ -490,6 +493,7 @@ func (s *Server) handleRoutesSubmit(w http.ResponseWriter, r *http.Request) {
 				Split:       parseSplit(valueAt(splits, i)),
 				Name:        valueAt(names, i),
 				Rewrite:     parseRewrite(valueAt(stripPrefixes, i), valueAt(reqHeaders, i)),
+				Auth:        parseAuth(valueAt(auths, i)),
 			},
 		})
 	}
@@ -659,6 +663,73 @@ func formatRewrite(rw *controlplane.RouteRewrite) (stripPrefix, reqHeaders strin
 		lines = append(lines, "-"+name)
 	}
 	return rw.StripPathPrefix, strings.Join(lines, "\n")
+}
+
+// parseAuth parses the routes editor's compact auth field into a
+// RouteAuth. Syntax:
+//
+//	(empty)                       -> open route (nil)
+//	apikey:KEY1,KEY2              -> API key in X-API-Key header
+//	jwt:hmac:SECRET               -> JWT validated with an HMAC secret
+//	jwt:hmac:SECRET:ISS:AUD       -> ... also requiring issuer/audience
+//
+// Anything unrecognised yields nil (open) rather than a broken policy.
+func parseAuth(s string) *controlplane.RouteAuth {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	if rest, ok := strings.CutPrefix(s, "apikey:"); ok {
+		var keys []string
+		for _, k := range strings.Split(rest, ",") {
+			if k = strings.TrimSpace(k); k != "" {
+				keys = append(keys, k)
+			}
+		}
+		if len(keys) == 0 {
+			return nil
+		}
+		return &controlplane.RouteAuth{Mode: "api_key", APIKeys: keys}
+	}
+	if rest, ok := strings.CutPrefix(s, "jwt:hmac:"); ok {
+		parts := strings.Split(rest, ":")
+		if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+			return nil
+		}
+		a := &controlplane.RouteAuth{Mode: "jwt", HMACSecret: strings.TrimSpace(parts[0])}
+		if len(parts) >= 2 {
+			a.ExpectedIssuer = strings.TrimSpace(parts[1])
+		}
+		if len(parts) >= 3 {
+			a.ExpectedAudience = strings.TrimSpace(parts[2])
+		}
+		return a
+	}
+	return nil
+}
+
+// formatAuth renders a RouteAuth back into the compact editor field so a
+// saved policy round-trips. RSA-key JWT policies (set out-of-band) render
+// as a read-only marker since a PEM doesn't fit the one-line field.
+func formatAuth(a *controlplane.RouteAuth) string {
+	if a == nil || a.Mode == "" || a.Mode == "none" {
+		return ""
+	}
+	switch a.Mode {
+	case "api_key":
+		return "apikey:" + strings.Join(a.APIKeys, ",")
+	case "jwt":
+		if a.RSAPublicKeyPEM != "" {
+			return "jwt:rsa(configured)"
+		}
+		out := "jwt:hmac:" + a.HMACSecret
+		if a.ExpectedIssuer != "" || a.ExpectedAudience != "" {
+			out += ":" + a.ExpectedIssuer + ":" + a.ExpectedAudience
+		}
+		return out
+	default:
+		return ""
+	}
 }
 
 // metricsChartPoint is the small JSON shape the dashboard's chart JS

@@ -342,6 +342,33 @@ Fleet view; noted as a follow-up rather than blocking this feature, since
 it's a display-only gap and doesn't affect actual routing/proxying
 behavior.
 
+## Edge authentication (per-route)
+
+A route can require callers to **authenticate before the request is
+proxied** — checked at the edge, so an unauthenticated request is rejected
+with `401` and never reaches a backend. Configured per rule in the routes
+editor's **Auth** field (open by default). This is distinct from
+[control-plane API authentication](#control-plane-api-authentication),
+which secures the data-plane↔control-plane gRPC link, not real client
+traffic.
+
+Two modes:
+
+- **API key** — `apikey:KEY1,KEY2` requires the request to carry one of the
+  listed keys in the `X-API-Key` header. Keys are compared in constant time.
+- **JWT** — `jwt:hmac:SECRET` requires a `Authorization: Bearer <token>`
+  whose JWT validates against the HMAC secret (HS256/384/512) and is
+  unexpired. Append `:issuer:audience` (`jwt:hmac:SECRET:my-iss:my-aud`) to
+  also require those claims. RSA-signed tokens (RS256/384/512) are supported
+  in the route policy via a configured public key.
+
+A failed check returns `401` with an appropriate `WWW-Authenticate`
+challenge; an unknown/misconfigured mode fails closed (rejects) rather than
+silently allowing. Auth is part of the global route table, pushed to every
+data plane, so it takes effect on save with no restart. Because it's
+per-route, different paths/hosts from the same instance can have different
+(or no) auth.
+
 ## Sticky sessions
 
 By default, every load-balancing algorithm (round robin, least

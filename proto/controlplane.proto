@@ -136,6 +136,10 @@ message Route {
   // Request/response rewrites applied when this rule matches, before the
   // request is proxied. All are optional; an empty rewrite is a no-op.
   RouteRewrite rewrite = 7;
+
+  // Edge authentication required on matched requests, checked before the
+  // request is proxied to a backend. Nil/unset means no auth (open route).
+  RouteAuth auth = 8;
 }
 
 // RouteRewrite describes header and path transformations applied to a
@@ -157,6 +161,27 @@ message RouteRewrite {
   // If non-empty, this literal prefix is prepended to the request path
   // before proxying. Applied after strip_path_prefix.
   string add_path_prefix = 6;
+}
+
+// RouteAuth describes edge authentication enforced on a matched request
+// before it is proxied. Exactly one mode is active, selected by `mode`.
+message RouteAuth {
+  // Mode: "" or "none" (open), "api_key", or "jwt".
+  string mode = 1;
+
+  // api_key mode: the request must present one of api_keys in the header
+  // named api_key_header (default "X-API-Key").
+  repeated string api_keys = 2;
+  string api_key_header = 3;
+
+  // jwt mode: the bearer token in the Authorization header must be a valid
+  // JWT. hmac_secret validates HS256/384/512 tokens; if empty,
+  // rsa_public_key_pem (PEM-encoded) validates RS256/384/512 tokens.
+  // Optional expected issuer/audience are enforced when set.
+  string hmac_secret = 4;
+  string rsa_public_key_pem = 5;
+  string expected_issuer = 6;
+  string expected_audience = 7;
 }
 
 // RouteTarget is one weighted destination of a canary/split route rule.
