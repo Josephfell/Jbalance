@@ -3,8 +3,6 @@ package controlplane
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -106,8 +104,9 @@ func (r Route) Matches(host, path, method string) bool {
 // which is what lets a single data plane route different requests to
 // different backend groups.
 type RouteStore struct {
-	path string
-	mu   sync.RWMutex
+	store BlobStore
+	key   string
+	mu    sync.RWMutex
 	// routes is stored in evaluation order — first match wins, so order
 	// is significant and must survive persistence/reload.
 	routes  []Route
@@ -119,14 +118,22 @@ type RouteStore struct {
 // common state: every data plane instance simply falls back to its own
 // -group flag, exactly as it did before L7 routing existed.
 func NewRouteStore(path string) *RouteStore {
-	s := &RouteStore{path: path}
+	// Backward-compatible constructor: a file path maps to a FileBlobStore
+	// over its directory, keyed by the file's base name (sans .json).
+	store, key := fileStoreFromPath(path)
+	return NewRouteStoreWithBackend(store, key)
+}
 
-	if path == "" {
+// NewRouteStoreWithBackend loads the route table from the given blob store
+// under key (used for the Postgres/shared backend). A nil store yields an
+// in-memory-only store that never persists (used by some tests).
+func NewRouteStoreWithBackend(store BlobStore, key string) *RouteStore {
+	s := &RouteStore{store: store, key: key}
+	if store == nil {
 		return s
 	}
-
-	data, err := os.ReadFile(path)
-	if err == nil {
+	data, err := store.Load(key)
+	if err == nil && len(data) > 0 {
 		var loaded struct {
 			Routes  []Route `json:"routes"`
 			Version int64   `json:"version"`
@@ -136,7 +143,6 @@ func NewRouteStore(path string) *RouteStore {
 			s.version = loaded.Version
 		}
 	}
-
 	return s
 }
 
@@ -178,41 +184,12 @@ func (s *RouteStore) Set(routes []Route) error {
 }
 
 func (s *RouteStore) persist(data any) error {
-	if s.path == "" {
+	if s.store == nil {
 		return nil
 	}
-
 	encoded, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("controlplane: failed to marshal route table: %w", err)
 	}
-
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("controlplane: failed to create route table directory: %w", err)
-	}
-
-	tmp, err := os.CreateTemp(dir, ".routes-*.tmp")
-	if err != nil {
-		return fmt.Errorf("controlplane: failed to create route table temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	if _, err := tmp.Write(encoded); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("controlplane: failed to write route table temp file: %w", err)
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("controlplane: failed to set route table file permissions: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("controlplane: failed to close route table temp file: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		return fmt.Errorf("controlplane: failed to persist route table: %w", err)
-	}
-	return nil
+	return s.store.Save(s.key, encoded)
 }

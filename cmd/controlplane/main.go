@@ -80,6 +80,12 @@ func main() {
 	adminOverridesPath := flag.String("admin-overrides-path", envflag.String("LB_ADMIN_OVERRIDES_PATH", "/var/lib/go-loadbalancer/overrides.json"), "path to the local file storing manual per-backend weight/drain overrides set via the admin web UI [env: LB_ADMIN_OVERRIDES_PATH]")
 	adminAlgorithmsPath := flag.String("admin-algorithms-path", envflag.String("LB_ADMIN_ALGORITHMS_PATH", "/var/lib/go-loadbalancer/algorithms.json"), "path to the local file storing per-group load-balancing algorithm selections set via the admin web UI [env: LB_ADMIN_ALGORITHMS_PATH]")
 	adminRoutesPath := flag.String("admin-routes-path", envflag.String("LB_ADMIN_ROUTES_PATH", "/var/lib/go-loadbalancer/routes.json"), "path to the local file storing the L7 route table set via the admin web UI [env: LB_ADMIN_ROUTES_PATH]")
+
+	// Admin state store backend. "file" (default) keeps the local-JSON
+	// behaviour; "postgres" stores admin state in a shared database so
+	// multiple control-plane replicas share one source of truth (HA).
+	storeBackend := flag.String("store-backend", envflag.String("LB_STORE_BACKEND", "file"), "admin state store backend: 'file' (local JSON, default) or 'postgres' (shared DB for multi-replica HA) [env: LB_STORE_BACKEND]")
+	storeDSN := flag.String("store-dsn", envflag.String("LB_STORE_DSN", ""), "(postgres store) connection string, e.g. postgres://user:pass@host:5432/db?sslmode=require [env: LB_STORE_DSN]")
 	adminStickyPath := flag.String("admin-sticky-path", envflag.String("LB_ADMIN_STICKY_PATH", "/var/lib/go-loadbalancer/sticky.json"), "path to the local file storing per-group sticky-session configuration set via the admin web UI [env: LB_ADMIN_STICKY_PATH]")
 	adminRateLimitPath := flag.String("admin-ratelimit-path", envflag.String("LB_ADMIN_RATELIMIT_PATH", "/var/lib/go-loadbalancer/ratelimit.json"), "path to the local file storing per-group rate-limit configuration set via the admin web UI [env: LB_ADMIN_RATELIMIT_PATH]")
 	adminTLSCert := flag.String("admin-tls-cert", envflag.String("LB_ADMIN_TLS_CERT", ""), "path to a TLS certificate for the admin web UI; if unset, it serves plain HTTP [env: LB_ADMIN_TLS_CERT]")
@@ -119,6 +125,9 @@ func main() {
 		K8sKubeconfig: *k8sKubeconfig,
 
 		FileProviderPath: *fileProviderPath,
+
+		StoreBackend: *storeBackend,
+		StoreDSN:     *storeDSN,
 
 		AdminTLSCert: *adminTLSCert,
 		AdminTLSKey:  *adminTLSKey,
@@ -160,7 +169,23 @@ func main() {
 
 	overrides := controlplane.NewOverrideStore(*adminOverridesPath)
 	algorithms := controlplane.NewAlgorithmStore(*adminAlgorithmsPath)
-	routes := controlplane.NewRouteStore(*adminRoutesPath)
+
+	// The route table can be backed by a shared store (Postgres) so
+	// multiple control-plane replicas serve the same routes — the basis
+	// for control-plane HA. Other admin stores follow the same pattern.
+	var routes *controlplane.RouteStore
+	if *storeBackend == "postgres" {
+		blob, closeStore, err := controlplane.NewBlobStore(*storeBackend, "", *storeDSN)
+		if err != nil {
+			fatal("failed to open admin state store", "error", err)
+		}
+		defer func() { _ = closeStore() }()
+		routes = controlplane.NewRouteStoreWithBackend(blob, "routes")
+		slog.Info("admin state store backend: postgres (shared)", "component", "controlplane")
+	} else {
+		routes = controlplane.NewRouteStore(*adminRoutesPath)
+	}
+
 	sticky := controlplane.NewStickyStore(*adminStickyPath)
 	rateLimits := controlplane.NewRateLimitStore(*adminRateLimitPath)
 	srv := controlplane.NewServer(provider, overrides, algorithms, routes, sticky, rateLimits)

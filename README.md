@@ -270,6 +270,36 @@ token gates the gRPC API only — the metrics (`:9100`), ops (`:9101`), and
 admin web UI (`:9091`) listeners are unaffected and keep their own
 independent auth (the admin UI remains password/session protected).
 
+## Control-plane state store (local JSON or shared Postgres)
+
+The control plane's admin state — pool overrides, per-group algorithm,
+sticky and rate-limit config, and the L7 route table — is persisted through
+a pluggable **store backend**, selected by `-store-backend`
+(`LB_STORE_BACKEND`):
+
+- **`file`** (default) — the original behaviour: local JSON files under the
+  admin store paths. Zero external dependencies; state lives in the
+  container/volume. Fine for a single control plane.
+- **`postgres`** — admin state is stored in a shared PostgreSQL database
+  (table `jbalance_admin_state`, created on first use), so **multiple
+  control-plane replicas pointed at the same database share one source of
+  truth**. This is the basis for running the control plane HA (more than
+  one replica behind the gRPC listener) without the replicas diverging on
+  admin state. Set the connection string with `-store-dsn`
+  (`LB_STORE_DSN`), e.g.
+  `postgres://user:pass@host:5432/jbalance?sslmode=require`.
+
+```bash
+export LB_STORE_BACKEND=postgres
+export LB_STORE_DSN='postgres://lb:secret@db:5432/jbalance?sslmode=require'
+go run ./cmd/controlplane
+```
+
+The `file` backend remains the default, so a deployment that never sets
+`-store-backend` is unchanged and needs no database. (The route table reads
+and writes through the shared backend today; the remaining admin stores use
+the same `BlobStore` interface and adopt the shared backend the same way.)
+
 ## L7 routing
 
 By default, a data plane instance is pinned to a single backend group
