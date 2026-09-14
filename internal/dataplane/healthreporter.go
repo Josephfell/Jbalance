@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	pb "github.com/Josephfell/Jbalance/proto"
 )
@@ -29,18 +27,20 @@ type HealthReporter struct {
 	instanceID       string
 	backends         *BackendList
 	tlsConfig        *tls.Config // nil means plaintext
+	authToken        string      // "" means no bearer-token auth
 	interval         time.Duration
 }
 
 // NewHealthReporter creates a reporter that sends backends' health status
 // to the control plane at controlPlaneAddr every interval.
-func NewHealthReporter(controlPlaneAddr, group, instanceID string, backends *BackendList, tlsConfig *tls.Config, interval time.Duration) *HealthReporter {
+func NewHealthReporter(controlPlaneAddr, group, instanceID string, backends *BackendList, tlsConfig *tls.Config, authToken string, interval time.Duration) *HealthReporter {
 	return &HealthReporter{
 		controlPlaneAddr: controlPlaneAddr,
 		group:            group,
 		instanceID:       instanceID,
 		backends:         backends,
 		tlsConfig:        tlsConfig,
+		authToken:        authToken,
 		interval:         interval,
 	}
 }
@@ -51,14 +51,7 @@ func NewHealthReporter(controlPlaneAddr, group, instanceID string, backends *Bac
 // traffic even if health reporting is temporarily unable to reach the
 // control plane.
 func (r *HealthReporter) Run(ctx context.Context) {
-	var transportCreds credentials.TransportCredentials
-	if r.tlsConfig != nil {
-		transportCreds = credentials.NewTLS(r.tlsConfig)
-	} else {
-		transportCreds = insecure.NewCredentials()
-	}
-
-	conn, err := grpc.NewClient(r.controlPlaneAddr, grpc.WithTransportCredentials(transportCreds))
+	conn, err := grpc.NewClient(r.controlPlaneAddr, dialOptions(r.tlsConfig, r.authToken)...)
 	if err != nil {
 		slog.Error("health reporter failed to create client", "component", "dataplane", "error", err)
 		return

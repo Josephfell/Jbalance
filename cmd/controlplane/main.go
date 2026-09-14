@@ -26,6 +26,7 @@ import (
 	"github.com/Josephfell/Jbalance/internal/config"
 	"github.com/Josephfell/Jbalance/internal/controlplane"
 	"github.com/Josephfell/Jbalance/internal/envflag"
+	"github.com/Josephfell/Jbalance/internal/grpcauth"
 	"github.com/Josephfell/Jbalance/internal/logging"
 	"github.com/Josephfell/Jbalance/internal/pool"
 	"github.com/Josephfell/Jbalance/internal/tlsutil"
@@ -49,6 +50,8 @@ func main() {
 	tlsCertFile := flag.String("tls-cert", envflag.String("LB_TLS_CERT", ""), "path to a TLS certificate file for the gRPC server; if unset, the server runs in plaintext [env: LB_TLS_CERT]")
 	tlsKeyFile := flag.String("tls-key", envflag.String("LB_TLS_KEY", ""), "path to the TLS private key matching -tls-cert [env: LB_TLS_KEY]")
 	tlsClientCAFile := flag.String("tls-client-ca", envflag.String("LB_TLS_CLIENT_CA", ""), "path to a CA cert used to require and verify data plane client certificates (mutual TLS); if unset, any client can connect once TLS is enabled [env: LB_TLS_CLIENT_CA]")
+
+	authToken := flag.String("control-plane-auth-token", envflag.String("LB_CONTROL_PLANE_AUTH_TOKEN", ""), "shared bearer token required on the gRPC control API; data planes must present the same token via -control-plane-auth-token. If unset, the API is unauthenticated (any client that can reach it gets full access). Send it over TLS (-tls-cert) so the token is not exposed in cleartext [env: LB_CONTROL_PLANE_AUTH_TOKEN]")
 
 	providerKind := flag.String("provider", envflag.String("LB_PROVIDER", "fake"), "backend pool provider to use: 'fake' (local testing), 'azure-vmss', or 'kubernetes' [env: LB_PROVIDER]")
 
@@ -187,6 +190,16 @@ func main() {
 		slog.Info("TLS enabled", "component", "controlplane", "mutual_tls", *tlsClientCAFile != "")
 	} else {
 		slog.Warn("running without TLS - gRPC traffic is unencrypted; use -tls-cert/-tls-key outside of local development", "component", "controlplane")
+	}
+
+	if *authToken != "" {
+		serverOpts = append(serverOpts,
+			grpc.ChainUnaryInterceptor(grpcauth.UnaryInterceptor(*authToken)),
+			grpc.ChainStreamInterceptor(grpcauth.StreamInterceptor(*authToken)),
+		)
+		slog.Info("gRPC control API authentication enabled (bearer token)", "component", "controlplane")
+	} else {
+		slog.Warn("gRPC control API is UNAUTHENTICATED - any client that can reach it gets full access; set -control-plane-auth-token outside of local development", "component", "controlplane")
 	}
 
 	grpcServer := grpc.NewServer(serverOpts...)

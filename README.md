@@ -231,6 +231,45 @@ store file only exists inside that container's writable layer otherwise.
 - Disable it entirely with `-admin-disable` if you don't want the web UI
   running at all.
 
+## Control-plane API authentication
+
+The gRPC control API (`-grpc-addr`, default `:9090`) is what data planes
+connect to for backend lists, the L7 route table, health reporting, and
+metrics reporting. Transport can be secured with TLS/mTLS (see
+`-control-plane-tls-*` on the data plane and `-tls-*` on the control
+plane), but transport security alone only proves *who* the peer is at the
+TLS layer — it does not gate the API. **Control-plane API authentication**
+adds an application-layer bearer token so that only clients presenting the
+right token get backend/route/config streams, independent of whether TLS
+is in use.
+
+Set the same token on both sides:
+
+- **Control plane:** `-control-plane-auth-token`
+  (`LB_CONTROL_PLANE_AUTH_TOKEN`). When set, every RPC must present a
+  matching `Authorization: Bearer <token>` metadata value or it is rejected
+  with gRPC `Unauthenticated`. The token is compared in constant time
+  (`crypto/subtle`).
+- **Data plane:** `-control-plane-auth-token`
+  (`LB_CONTROL_PLANE_AUTH_TOKEN`). When set, the token is attached to every
+  RPC on all of the data plane's connections to the control plane
+  (backend-list stream, route-table stream, health reports, metrics
+  reports).
+
+**Off by default.** With no token configured the API is unauthenticated —
+any client that can reach `:9090` (and pass TLS, if enabled) gets full
+access — so a deployment that never sets the flag is unchanged, and the
+control plane logs a warning at startup when it is running unauthenticated.
+
+**Send it over TLS.** The bearer credential works over a plaintext
+connection (so it can be used in local development), but on a plaintext
+connection the token travels in the clear. In any real deployment pair it
+with transport TLS (`-control-plane-tls` on the data plane, `-tls-cert`/
+`-tls-key` on the control plane) so the token is encrypted in transit. The
+token gates the gRPC API only — the metrics (`:9100`), ops (`:9101`), and
+admin web UI (`:9091`) listeners are unaffected and keep their own
+independent auth (the admin UI remains password/session protected).
+
 ## L7 routing
 
 By default, a data plane instance is pinned to a single backend group

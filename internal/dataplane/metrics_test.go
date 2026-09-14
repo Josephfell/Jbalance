@@ -106,7 +106,7 @@ func TestBackendsCollector_ReflectsGroupManagerLive(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, HealthCheckConfig{
+	groups := NewGroupManager(ctx, "127.0.0.1:1", "dp-test", nil, "", HealthCheckConfig{
 		Interval: time.Hour, Timeout: time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 	}, time.Hour)
 

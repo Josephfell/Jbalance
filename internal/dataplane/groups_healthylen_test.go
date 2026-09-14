@@ -19,7 +19,7 @@ func TestGroupManager_HealthyLen(t *testing.T) {
 	// a long one; the checker never actually reaches any backend here.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	gm := NewGroupManager(ctx, "127.0.0.1:0", "test", nil, HealthCheckConfig{
+	gm := NewGroupManager(ctx, "127.0.0.1:0", "test", nil, "", HealthCheckConfig{
 		Interval: time.Hour,
 		Timeout:  time.Second,
 	}, time.Hour)

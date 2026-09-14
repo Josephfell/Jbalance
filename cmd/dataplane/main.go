@@ -71,6 +71,7 @@ func main() {
 	cpTLSCACert := flag.String("control-plane-tls-ca", envflag.String("LB_CONTROL_PLANE_TLS_CA", ""), "CA cert to verify the control plane's TLS certificate against; if unset, the system root CA pool is used [env: LB_CONTROL_PLANE_TLS_CA]")
 	cpTLSClientCert := flag.String("control-plane-tls-client-cert", envflag.String("LB_CONTROL_PLANE_TLS_CLIENT_CERT", ""), "client cert to present to the control plane (mutual TLS); requires -control-plane-tls-client-key [env: LB_CONTROL_PLANE_TLS_CLIENT_CERT]")
 	cpTLSClientKey := flag.String("control-plane-tls-client-key", envflag.String("LB_CONTROL_PLANE_TLS_CLIENT_KEY", ""), "client key matching -control-plane-tls-client-cert [env: LB_CONTROL_PLANE_TLS_CLIENT_KEY]")
+	cpAuthToken := flag.String("control-plane-auth-token", envflag.String("LB_CONTROL_PLANE_AUTH_TOKEN", ""), "bearer token to present to the control plane's gRPC API; must match the control plane's -control-plane-auth-token. If unset, no token is sent. Send it over TLS (-control-plane-tls) so it is not exposed in cleartext [env: LB_CONTROL_PLANE_AUTH_TOKEN]")
 
 	httpTLSCert := flag.String("http-tls-cert", envflag.String("LB_HTTP_TLS_CERT", ""), "path to a TLS certificate for the data plane's HTTP listener; if unset, the listener runs in plaintext HTTP [env: LB_HTTP_TLS_CERT]")
 	httpTLSKey := flag.String("http-tls-key", envflag.String("LB_HTTP_TLS_KEY", ""), "path to the TLS private key matching -http-tls-cert [env: LB_HTTP_TLS_KEY]")
@@ -280,7 +281,7 @@ func main() {
 	// references any group beyond -group — routing is an L7-only concept
 	// — but reuses the same GroupManager for its health
 	// checking/reporting.)
-	groups := dataplane.NewGroupManager(ctx, *controlPlaneAddr, id, cpTLSConfig, dataplane.HealthCheckConfig{
+	groups := dataplane.NewGroupManager(ctx, *controlPlaneAddr, id, cpTLSConfig, *cpAuthToken, dataplane.HealthCheckConfig{
 		Interval:         *healthCheckInterval,
 		Timeout:          *healthCheckTimeout,
 		FailureThreshold: *unhealthyThreshold,
@@ -316,7 +317,7 @@ func main() {
 		// Prometheus server scraping this instance's /metrics — the
 		// control plane has no route back to reach this instance
 		// directly (only the reverse connection exists).
-		metricsReporter := dataplane.NewMetricsReporter(*controlPlaneAddr, id, metrics, cpTLSConfig, *metricsReportInterval)
+		metricsReporter := dataplane.NewMetricsReporter(*controlPlaneAddr, id, metrics, cpTLSConfig, *cpAuthToken, *metricsReportInterval)
 		go metricsReporter.Run(ctx)
 	} else {
 		slog.Info("metrics endpoint disabled", "component", "dataplane")
@@ -341,7 +342,7 @@ func main() {
 	}
 
 	routes := dataplane.NewRouteTable(*group)
-	routeSub := dataplane.NewRouteSubscriber(*controlPlaneAddr, id, routes, cpTLSConfig)
+	routeSub := dataplane.NewRouteSubscriber(*controlPlaneAddr, id, routes, cpTLSConfig, *cpAuthToken)
 	go routeSub.Run(ctx)
 
 	proxy := dataplane.NewProxy(routes, groups, metrics, dataplane.ProxyConfig{

@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	pb "github.com/Josephfell/Jbalance/proto"
 )
@@ -22,19 +20,22 @@ type Subscriber struct {
 	instanceID       string
 	backends         *BackendList
 	tlsConfig        *tls.Config // nil means plaintext
+	authToken        string      // "" means no bearer-token auth
 }
 
 // NewSubscriber creates a subscriber that will update the given BackendList
 // as updates arrive from the control plane at controlPlaneAddr. Pass a
 // non-nil tlsConfig to connect over TLS; pass nil for plaintext (local
-// development only).
-func NewSubscriber(controlPlaneAddr, group, instanceID string, backends *BackendList, tlsConfig *tls.Config) *Subscriber {
+// development only). Pass a non-empty authToken to present a bearer token
+// on every RPC.
+func NewSubscriber(controlPlaneAddr, group, instanceID string, backends *BackendList, tlsConfig *tls.Config, authToken string) *Subscriber {
 	return &Subscriber{
 		controlPlaneAddr: controlPlaneAddr,
 		group:            group,
 		instanceID:       instanceID,
 		backends:         backends,
 		tlsConfig:        tlsConfig,
+		authToken:        authToken,
 	}
 }
 
@@ -81,14 +82,7 @@ func (s *Subscriber) Run(ctx context.Context) {
 // cancelled. Returns whether at least one BackendSet was received, and any
 // error encountered (nil if ending was due to context cancellation).
 func (s *Subscriber) streamOnce(ctx context.Context) (bool, error) {
-	var transportCreds credentials.TransportCredentials
-	if s.tlsConfig != nil {
-		transportCreds = credentials.NewTLS(s.tlsConfig)
-	} else {
-		transportCreds = insecure.NewCredentials()
-	}
-
-	conn, err := grpc.NewClient(s.controlPlaneAddr, grpc.WithTransportCredentials(transportCreds))
+	conn, err := grpc.NewClient(s.controlPlaneAddr, dialOptions(s.tlsConfig, s.authToken)...)
 	if err != nil {
 		return false, err
 	}

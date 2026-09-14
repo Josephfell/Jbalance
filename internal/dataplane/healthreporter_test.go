@@ -57,7 +57,7 @@ func TestHealthReporter_SendsCurrentHealthSnapshot(t *testing.T) {
 	})
 	backends.SetHealth("b:1", false)
 
-	reporter := NewHealthReporter(addr, "web-tier", "dp-test", backends, nil, 20*time.Millisecond)
+	reporter := NewHealthReporter(addr, "web-tier", "dp-test", backends, nil, "", 20*time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -95,7 +95,7 @@ func TestHealthReporter_SendsNothingWhenNoBackendsKnown(t *testing.T) {
 
 	backends := NewBackendList() // empty — no Update called yet
 
-	reporter := NewHealthReporter(addr, "web-tier", "dp-test", backends, nil, 20*time.Millisecond)
+	reporter := NewHealthReporter(addr, "web-tier", "dp-test", backends, nil, "", 20*time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -115,7 +115,7 @@ func TestHealthReporter_ContinuesAfterConnectionFailure(t *testing.T) {
 	backends := NewBackendList()
 	backends.Update(&pb.BackendSet{Group: "g", Version: 1, Backends: []*pb.Backend{{Address: "a:1", Weight: 1}}})
 
-	reporter := NewHealthReporter("127.0.0.1:1", "g", "dp-test", backends, nil, 20*time.Millisecond)
+	reporter := NewHealthReporter("127.0.0.1:1", "g", "dp-test", backends, nil, "", 20*time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
