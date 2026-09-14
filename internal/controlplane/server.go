@@ -290,6 +290,17 @@ func (s *Server) publishRoutes() {
 			}
 			split = append(split, &pb.RouteTarget{Group: tgt.Group, Weight: tgt.Weight})
 		}
+		var rewrite *pb.RouteRewrite
+		if r.Rewrite != nil {
+			rewrite = &pb.RouteRewrite{
+				SetRequestHeaders:     r.Rewrite.SetRequestHeaders,
+				RemoveRequestHeaders:  r.Rewrite.RemoveRequestHeaders,
+				SetResponseHeaders:    r.Rewrite.SetResponseHeaders,
+				RemoveResponseHeaders: r.Rewrite.RemoveResponseHeaders,
+				StripPathPrefix:       r.Rewrite.StripPathPrefix,
+				AddPathPrefix:         r.Rewrite.AddPathPrefix,
+			}
+		}
 		table.Routes = append(table.Routes, &pb.Route{
 			Host:        r.Host,
 			PathPrefix:  r.PathPrefix,
@@ -297,6 +308,7 @@ func (s *Server) publishRoutes() {
 			TargetGroup: r.TargetGroup,
 			Name:        r.Name,
 			Split:       split,
+			Rewrite:     rewrite,
 		})
 	}
 

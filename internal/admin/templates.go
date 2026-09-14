@@ -673,7 +673,7 @@ const templatesSource = `
         <div class="right"><span class="clock-pill" id="clock"></span></div>
       </header>
       <div class="content">
-        <p class="routes-note">A request matching no rule below (or an empty table) falls back to each data plane instance's own <code>-group</code> flag. Host and path-prefix fields may be left blank to match anything; the methods field accepts a comma-separated list (e.g. <code>GET, POST</code>) and is left blank to match any method.</p>
+        <p class="routes-note">A request matching no rule below (or an empty table) falls back to each data plane instance's own <code>-group</code> flag. Host and path-prefix fields may be left blank to match anything; the methods field accepts a comma-separated list (e.g. <code>GET, POST</code>) and is left blank to match any method. <strong>Strip prefix</strong> removes a literal path prefix before proxying (e.g. <code>/api</code>). <strong>Req headers</strong> take one <code>Name: value</code> per line to set a request header, or <code>-Name</code> to remove one.</p>
         <form method="post" action="/routes" id="routes-form">
           <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
           <section class="card">
@@ -686,6 +686,8 @@ const templatesSource = `
                 <th class="col-methods">Methods</th>
                 <th class="col-group">Target group</th>
                 <th class="col-split">Split (canary)</th>
+                <th class="col-strip">Strip prefix</th>
+                <th class="col-headers">Req headers</th>
                 <th class="col-del">Remove</th>
               </tr>
               <tbody id="routes-body">
@@ -706,6 +708,8 @@ const templatesSource = `
                     </select>
                   </td>
                   <td><input type="text" name="split" value="{{.Split}}" placeholder="e.g. stable:90, canary:10"></td>
+                  <td><input type="text" name="strip_prefix" value="{{.StripPrefix}}" placeholder="/api"></td>
+                  <td><textarea name="req_headers" rows="2" placeholder="X-From: edge&#10;-X-Debug">{{.ReqHeaders}}</textarea></td>
                   <td class="col-del">
                     <input type="hidden" name="order" value="{{.Order}}">
                     <input type="hidden" name="action" value="keep">
@@ -790,6 +794,19 @@ const templatesSource = `
         splitInput.placeholder = 'e.g. stable:90, canary:10';
         splitTd.appendChild(splitInput);
         tr.appendChild(splitTd);
+
+        var stripTd = document.createElement('td');
+        var stripInput = document.createElement('input');
+        stripInput.type = 'text'; stripInput.name = 'strip_prefix'; stripInput.placeholder = '/api';
+        stripTd.appendChild(stripInput);
+        tr.appendChild(stripTd);
+
+        var hdrTd = document.createElement('td');
+        var hdrInput = document.createElement('textarea');
+        hdrInput.name = 'req_headers'; hdrInput.rows = 2;
+        hdrInput.placeholder = 'X-From: edge\n-X-Debug';
+        hdrTd.appendChild(hdrInput);
+        tr.appendChild(hdrTd);
 
         var delTd = document.createElement('td');
         delTd.className = 'col-del';

@@ -102,6 +102,12 @@ const statusCodeKey contextKey = iota + 1
 // back to decide whether a retry against a different backend is warranted.
 const upstreamErrKey contextKey = iota + 2
 
+// rewriteKey stores the matched route's routeRewrite in the request
+// context, set by Handler after route resolution and read back by the
+// shared ReverseProxy Rewrite/ModifyResponse hooks so per-route header
+// and path transformations are applied without a per-request proxy.
+const rewriteKey contextKey = iota + 4
+
 // NewProxy creates a reverse proxy that resolves each request's target
 // group via routes and selects a backend within that group via groups.
 // metrics may be nil, in which case no request metrics are recorded (a
@@ -152,10 +158,18 @@ func NewProxy(routes *RouteTable, groups *GroupManager, metrics *Metrics, cfg Pr
 			addr, _ := pr.In.Context().Value(backendAddrKey).(string)
 			pr.SetURL(&url.URL{Scheme: "http", Host: addr})
 			pr.SetXForwarded()
+			// Apply the matched route's request rewrite (path prefix,
+			// request headers) to the outbound request.
+			if rw, ok := pr.In.Context().Value(rewriteKey).(routeRewrite); ok {
+				rw.applyRequest(pr.Out)
+			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if ptr, ok := resp.Request.Context().Value(statusCodeKey).(*int); ok {
 				*ptr = resp.StatusCode
+			}
+			if rw, ok := resp.Request.Context().Value(rewriteKey).(routeRewrite); ok {
+				rw.applyResponse(resp.Header)
 			}
 			return nil
 		},
@@ -190,7 +204,10 @@ func NewProxy(routes *RouteTable, groups *GroupManager, metrics *Metrics, cfg Pr
 // attempt's response back so a retry can still succeed cleanly.
 func (p *Proxy) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		group := p.routes.Resolve(r.Host, r.URL.Path, r.Method)
+		group, rewrite := p.routes.ResolveRoute(r.Host, r.URL.Path, r.Method)
+		if !rewrite.isZero() {
+			r = r.WithContext(context.WithValue(r.Context(), rewriteKey, rewrite))
+		}
 		backends := p.groups.Ensure(group)
 
 		start := time.Now()

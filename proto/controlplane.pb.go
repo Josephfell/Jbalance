@@ -478,7 +478,10 @@ type Route struct {
 	// to one of these groups chosen by weight (e.g. 90/10 stable/canary)
 	// rather than always to target_group. When empty, target_group is
 	// used. A single-entry split is equivalent to target_group.
-	Split         []*RouteTarget `protobuf:"bytes,6,rep,name=split,proto3" json:"split,omitempty"`
+	Split []*RouteTarget `protobuf:"bytes,6,rep,name=split,proto3" json:"split,omitempty"`
+	// Request/response rewrites applied when this rule matches, before the
+	// request is proxied. All are optional; an empty rewrite is a no-op.
+	Rewrite       *RouteRewrite `protobuf:"bytes,7,opt,name=rewrite,proto3" json:"rewrite,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -555,6 +558,109 @@ func (x *Route) GetSplit() []*RouteTarget {
 	return nil
 }
 
+func (x *Route) GetRewrite() *RouteRewrite {
+	if x != nil {
+		return x.Rewrite
+	}
+	return nil
+}
+
+// RouteRewrite describes header and path transformations applied to a
+// matched request (and its response). Every field is optional.
+type RouteRewrite struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Request headers to set (overwriting any existing value). Map of
+	// header name -> value.
+	SetRequestHeaders map[string]string `protobuf:"bytes,1,rep,name=set_request_headers,json=setRequestHeaders,proto3" json:"set_request_headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Request header names to remove before proxying to the backend.
+	RemoveRequestHeaders []string `protobuf:"bytes,2,rep,name=remove_request_headers,json=removeRequestHeaders,proto3" json:"remove_request_headers,omitempty"`
+	// Response headers to set on the way back to the client.
+	SetResponseHeaders map[string]string `protobuf:"bytes,3,rep,name=set_response_headers,json=setResponseHeaders,proto3" json:"set_response_headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Response header names to remove from the backend's response.
+	RemoveResponseHeaders []string `protobuf:"bytes,4,rep,name=remove_response_headers,json=removeResponseHeaders,proto3" json:"remove_response_headers,omitempty"`
+	// If non-empty, this literal prefix is stripped from the request path
+	// before proxying (e.g. strip "/api" so the backend sees "/v1/x" for a
+	// request to "/api/v1/x"). Applied before add_path_prefix.
+	StripPathPrefix string `protobuf:"bytes,5,opt,name=strip_path_prefix,json=stripPathPrefix,proto3" json:"strip_path_prefix,omitempty"`
+	// If non-empty, this literal prefix is prepended to the request path
+	// before proxying. Applied after strip_path_prefix.
+	AddPathPrefix string `protobuf:"bytes,6,opt,name=add_path_prefix,json=addPathPrefix,proto3" json:"add_path_prefix,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RouteRewrite) Reset() {
+	*x = RouteRewrite{}
+	mi := &file_proto_controlplane_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouteRewrite) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouteRewrite) ProtoMessage() {}
+
+func (x *RouteRewrite) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_controlplane_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouteRewrite.ProtoReflect.Descriptor instead.
+func (*RouteRewrite) Descriptor() ([]byte, []int) {
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *RouteRewrite) GetSetRequestHeaders() map[string]string {
+	if x != nil {
+		return x.SetRequestHeaders
+	}
+	return nil
+}
+
+func (x *RouteRewrite) GetRemoveRequestHeaders() []string {
+	if x != nil {
+		return x.RemoveRequestHeaders
+	}
+	return nil
+}
+
+func (x *RouteRewrite) GetSetResponseHeaders() map[string]string {
+	if x != nil {
+		return x.SetResponseHeaders
+	}
+	return nil
+}
+
+func (x *RouteRewrite) GetRemoveResponseHeaders() []string {
+	if x != nil {
+		return x.RemoveResponseHeaders
+	}
+	return nil
+}
+
+func (x *RouteRewrite) GetStripPathPrefix() string {
+	if x != nil {
+		return x.StripPathPrefix
+	}
+	return ""
+}
+
+func (x *RouteRewrite) GetAddPathPrefix() string {
+	if x != nil {
+		return x.AddPathPrefix
+	}
+	return ""
+}
+
 // RouteTarget is one weighted destination of a canary/split route rule.
 type RouteTarget struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -570,7 +676,7 @@ type RouteTarget struct {
 
 func (x *RouteTarget) Reset() {
 	*x = RouteTarget{}
-	mi := &file_proto_controlplane_proto_msgTypes[8]
+	mi := &file_proto_controlplane_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -582,7 +688,7 @@ func (x *RouteTarget) String() string {
 func (*RouteTarget) ProtoMessage() {}
 
 func (x *RouteTarget) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_controlplane_proto_msgTypes[8]
+	mi := &file_proto_controlplane_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -595,7 +701,7 @@ func (x *RouteTarget) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteTarget.ProtoReflect.Descriptor instead.
 func (*RouteTarget) Descriptor() ([]byte, []int) {
-	return file_proto_controlplane_proto_rawDescGZIP(), []int{8}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RouteTarget) GetGroup() string {
@@ -629,7 +735,7 @@ type RouteTable struct {
 
 func (x *RouteTable) Reset() {
 	*x = RouteTable{}
-	mi := &file_proto_controlplane_proto_msgTypes[9]
+	mi := &file_proto_controlplane_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -641,7 +747,7 @@ func (x *RouteTable) String() string {
 func (*RouteTable) ProtoMessage() {}
 
 func (x *RouteTable) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_controlplane_proto_msgTypes[9]
+	mi := &file_proto_controlplane_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -654,7 +760,7 @@ func (x *RouteTable) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteTable.ProtoReflect.Descriptor instead.
 func (*RouteTable) Descriptor() ([]byte, []int) {
-	return file_proto_controlplane_proto_rawDescGZIP(), []int{9}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *RouteTable) GetRoutes() []*Route {
@@ -692,7 +798,7 @@ type GroupMetrics struct {
 
 func (x *GroupMetrics) Reset() {
 	*x = GroupMetrics{}
-	mi := &file_proto_controlplane_proto_msgTypes[10]
+	mi := &file_proto_controlplane_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -704,7 +810,7 @@ func (x *GroupMetrics) String() string {
 func (*GroupMetrics) ProtoMessage() {}
 
 func (x *GroupMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_controlplane_proto_msgTypes[10]
+	mi := &file_proto_controlplane_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -717,7 +823,7 @@ func (x *GroupMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GroupMetrics.ProtoReflect.Descriptor instead.
 func (*GroupMetrics) Descriptor() ([]byte, []int) {
-	return file_proto_controlplane_proto_rawDescGZIP(), []int{10}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GroupMetrics) GetGroup() string {
@@ -765,7 +871,7 @@ type MetricsReport struct {
 
 func (x *MetricsReport) Reset() {
 	*x = MetricsReport{}
-	mi := &file_proto_controlplane_proto_msgTypes[11]
+	mi := &file_proto_controlplane_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -777,7 +883,7 @@ func (x *MetricsReport) String() string {
 func (*MetricsReport) ProtoMessage() {}
 
 func (x *MetricsReport) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_controlplane_proto_msgTypes[11]
+	mi := &file_proto_controlplane_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -790,7 +896,7 @@ func (x *MetricsReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricsReport.ProtoReflect.Descriptor instead.
 func (*MetricsReport) Descriptor() ([]byte, []int) {
-	return file_proto_controlplane_proto_rawDescGZIP(), []int{11}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *MetricsReport) GetInstanceId() string {
@@ -815,7 +921,7 @@ type MetricsReportAck struct {
 
 func (x *MetricsReportAck) Reset() {
 	*x = MetricsReportAck{}
-	mi := &file_proto_controlplane_proto_msgTypes[12]
+	mi := &file_proto_controlplane_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -827,7 +933,7 @@ func (x *MetricsReportAck) String() string {
 func (*MetricsReportAck) ProtoMessage() {}
 
 func (x *MetricsReportAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_controlplane_proto_msgTypes[12]
+	mi := &file_proto_controlplane_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -840,7 +946,7 @@ func (x *MetricsReportAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricsReportAck.ProtoReflect.Descriptor instead.
 func (*MetricsReportAck) Descriptor() ([]byte, []int) {
-	return file_proto_controlplane_proto_rawDescGZIP(), []int{12}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{13}
 }
 
 var File_proto_controlplane_proto protoreflect.FileDescriptor
@@ -877,7 +983,7 @@ const file_proto_controlplane_proto_rawDesc = "" +
 	"\x0fHealthReportAck\"6\n" +
 	"\x13StreamRoutesRequest\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
-	"instanceId\"\xbe\x01\n" +
+	"instanceId\"\xf4\x01\n" +
 	"\x05Route\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x1f\n" +
 	"\vpath_prefix\x18\x02 \x01(\tR\n" +
@@ -885,7 +991,21 @@ const file_proto_controlplane_proto_rawDesc = "" +
 	"\amethods\x18\x03 \x03(\tR\amethods\x12!\n" +
 	"\ftarget_group\x18\x04 \x01(\tR\vtargetGroup\x12\x12\n" +
 	"\x04name\x18\x05 \x01(\tR\x04name\x12/\n" +
-	"\x05split\x18\x06 \x03(\v2\x19.controlplane.RouteTargetR\x05split\";\n" +
+	"\x05split\x18\x06 \x03(\v2\x19.controlplane.RouteTargetR\x05split\x124\n" +
+	"\arewrite\x18\a \x01(\v2\x1a.controlplane.RouteRewriteR\arewrite\"\xa6\x04\n" +
+	"\fRouteRewrite\x12a\n" +
+	"\x13set_request_headers\x18\x01 \x03(\v21.controlplane.RouteRewrite.SetRequestHeadersEntryR\x11setRequestHeaders\x124\n" +
+	"\x16remove_request_headers\x18\x02 \x03(\tR\x14removeRequestHeaders\x12d\n" +
+	"\x14set_response_headers\x18\x03 \x03(\v22.controlplane.RouteRewrite.SetResponseHeadersEntryR\x12setResponseHeaders\x126\n" +
+	"\x17remove_response_headers\x18\x04 \x03(\tR\x15removeResponseHeaders\x12*\n" +
+	"\x11strip_path_prefix\x18\x05 \x01(\tR\x0fstripPathPrefix\x12&\n" +
+	"\x0fadd_path_prefix\x18\x06 \x01(\tR\raddPathPrefix\x1aD\n" +
+	"\x16SetRequestHeadersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aE\n" +
+	"\x17SetResponseHeadersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\";\n" +
 	"\vRouteTarget\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x16\n" +
 	"\x06weight\x18\x02 \x01(\x05R\x06weight\"S\n" +
@@ -922,7 +1042,7 @@ func file_proto_controlplane_proto_rawDescGZIP() []byte {
 	return file_proto_controlplane_proto_rawDescData
 }
 
-var file_proto_controlplane_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_proto_controlplane_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_proto_controlplane_proto_goTypes = []any{
 	(*StreamBackendsRequest)(nil), // 0: controlplane.StreamBackendsRequest
 	(*Backend)(nil),               // 1: controlplane.Backend
@@ -932,31 +1052,37 @@ var file_proto_controlplane_proto_goTypes = []any{
 	(*HealthReportAck)(nil),       // 5: controlplane.HealthReportAck
 	(*StreamRoutesRequest)(nil),   // 6: controlplane.StreamRoutesRequest
 	(*Route)(nil),                 // 7: controlplane.Route
-	(*RouteTarget)(nil),           // 8: controlplane.RouteTarget
-	(*RouteTable)(nil),            // 9: controlplane.RouteTable
-	(*GroupMetrics)(nil),          // 10: controlplane.GroupMetrics
-	(*MetricsReport)(nil),         // 11: controlplane.MetricsReport
-	(*MetricsReportAck)(nil),      // 12: controlplane.MetricsReportAck
+	(*RouteRewrite)(nil),          // 8: controlplane.RouteRewrite
+	(*RouteTarget)(nil),           // 9: controlplane.RouteTarget
+	(*RouteTable)(nil),            // 10: controlplane.RouteTable
+	(*GroupMetrics)(nil),          // 11: controlplane.GroupMetrics
+	(*MetricsReport)(nil),         // 12: controlplane.MetricsReport
+	(*MetricsReportAck)(nil),      // 13: controlplane.MetricsReportAck
+	nil,                           // 14: controlplane.RouteRewrite.SetRequestHeadersEntry
+	nil,                           // 15: controlplane.RouteRewrite.SetResponseHeadersEntry
 }
 var file_proto_controlplane_proto_depIdxs = []int32{
 	1,  // 0: controlplane.BackendSet.backends:type_name -> controlplane.Backend
 	3,  // 1: controlplane.HealthReport.backends:type_name -> controlplane.BackendHealth
-	8,  // 2: controlplane.Route.split:type_name -> controlplane.RouteTarget
-	7,  // 3: controlplane.RouteTable.routes:type_name -> controlplane.Route
-	10, // 4: controlplane.MetricsReport.groups:type_name -> controlplane.GroupMetrics
-	0,  // 5: controlplane.ControlPlane.StreamBackends:input_type -> controlplane.StreamBackendsRequest
-	4,  // 6: controlplane.ControlPlane.ReportHealth:input_type -> controlplane.HealthReport
-	6,  // 7: controlplane.ControlPlane.StreamRoutes:input_type -> controlplane.StreamRoutesRequest
-	11, // 8: controlplane.ControlPlane.ReportMetrics:input_type -> controlplane.MetricsReport
-	2,  // 9: controlplane.ControlPlane.StreamBackends:output_type -> controlplane.BackendSet
-	5,  // 10: controlplane.ControlPlane.ReportHealth:output_type -> controlplane.HealthReportAck
-	9,  // 11: controlplane.ControlPlane.StreamRoutes:output_type -> controlplane.RouteTable
-	12, // 12: controlplane.ControlPlane.ReportMetrics:output_type -> controlplane.MetricsReportAck
-	9,  // [9:13] is the sub-list for method output_type
-	5,  // [5:9] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	9,  // 2: controlplane.Route.split:type_name -> controlplane.RouteTarget
+	8,  // 3: controlplane.Route.rewrite:type_name -> controlplane.RouteRewrite
+	14, // 4: controlplane.RouteRewrite.set_request_headers:type_name -> controlplane.RouteRewrite.SetRequestHeadersEntry
+	15, // 5: controlplane.RouteRewrite.set_response_headers:type_name -> controlplane.RouteRewrite.SetResponseHeadersEntry
+	7,  // 6: controlplane.RouteTable.routes:type_name -> controlplane.Route
+	11, // 7: controlplane.MetricsReport.groups:type_name -> controlplane.GroupMetrics
+	0,  // 8: controlplane.ControlPlane.StreamBackends:input_type -> controlplane.StreamBackendsRequest
+	4,  // 9: controlplane.ControlPlane.ReportHealth:input_type -> controlplane.HealthReport
+	6,  // 10: controlplane.ControlPlane.StreamRoutes:input_type -> controlplane.StreamRoutesRequest
+	12, // 11: controlplane.ControlPlane.ReportMetrics:input_type -> controlplane.MetricsReport
+	2,  // 12: controlplane.ControlPlane.StreamBackends:output_type -> controlplane.BackendSet
+	5,  // 13: controlplane.ControlPlane.ReportHealth:output_type -> controlplane.HealthReportAck
+	10, // 14: controlplane.ControlPlane.StreamRoutes:output_type -> controlplane.RouteTable
+	13, // 15: controlplane.ControlPlane.ReportMetrics:output_type -> controlplane.MetricsReportAck
+	12, // [12:16] is the sub-list for method output_type
+	8,  // [8:12] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_proto_controlplane_proto_init() }
@@ -970,7 +1096,7 @@ func file_proto_controlplane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_controlplane_proto_rawDesc), len(file_proto_controlplane_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   13,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

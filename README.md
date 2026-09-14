@@ -316,6 +316,23 @@ start. Stored in a local JSON file (`-admin-routes-path`, default
 `/var/lib/go-loadbalancer/routes.json`), same pattern as overrides and
 algorithm selection.
 
+**Request rewriting.** A rule can also transform a matched request before
+it is proxied, configured in two extra fields on each row of the routes
+editor:
+
+- **Strip prefix** — a literal path prefix removed before proxying, so a
+  request to `/api/v1/orders` matched by a rule with strip prefix `/api`
+  reaches the backend as `/v1/orders`. (A backend that expects to be
+  mounted at root doesn't need to know about the `/api` gateway prefix.)
+- **Req headers** — one `Name: value` per line to **set** a request header
+  sent to the backend (e.g. `X-From: edge`), or `-Name` on its own line to
+  **remove** an incoming header before it reaches the backend (e.g.
+  `-X-Debug`).
+
+Rewrites are part of the same global route table, pushed to every data
+plane with the rest of the route, so they take effect immediately on save
+with no restart. A rule with no rewrite fields behaves exactly as before.
+
 **Current limitation:** the admin UI's Fleet view shows one group per
 instance ID, taken from its most recently opened `StreamBackends` stream —
 an instance now proxying to multiple groups via routing will show
