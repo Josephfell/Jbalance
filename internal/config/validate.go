@@ -401,6 +401,9 @@ type ControlPlaneConfig struct {
 	// file provider
 	FileProviderPath string
 
+	StoreBackend string
+	StoreDSN     string
+
 	AdminTLSCert string
 	AdminTLSKey  string
 
@@ -415,6 +418,12 @@ func ValidateControlPlane(c ControlPlaneConfig) error {
 	var p problems
 
 	p.checkOneOf("-provider (LB_PROVIDER)", c.Provider, "fake", "file", "azure-vmss", "kubernetes")
+	if c.StoreBackend != "" {
+		p.checkOneOf("-store-backend (LB_STORE_BACKEND)", c.StoreBackend, "file", "postgres")
+	}
+	if c.StoreBackend == "postgres" && strings.TrimSpace(c.StoreDSN) == "" {
+		p.addf("-store-dsn (LB_STORE_DSN) is required when -store-backend is postgres")
+	}
 	p.checkOneOf("-log-level (LB_LOG_LEVEL)", c.LogLevel, "debug", "info", "warn", "error")
 	p.checkOneOf("-log-format (LB_LOG_FORMAT)", c.LogFormat, "json", "text")
 
