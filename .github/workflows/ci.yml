@@ -30,6 +30,9 @@ jobs:
       - name: go build
         run: go build ./...
 
+      - name: go mod verify
+        run: go mod verify
+
       - name: go vet
         run: go vet ./...
 
@@ -85,6 +88,28 @@ jobs:
             echo "Run 'gofmt -w .' locally and commit the changes."
             exit 1
           fi
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Scans the module (and its dependencies) for known vulnerabilities in
+      # code paths actually reachable from this project, using the Go
+      # vulnerability database. Pinned to a specific release rather than
+      # @latest so a new govulncheck release cannot silently start failing
+      # (or passing) CI here.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
+      - name: Run govulncheck
+        run: govulncheck ./...
 
   docker-build:
     name: Docker build (${{ matrix.binary }})
