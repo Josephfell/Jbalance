@@ -1,0 +1,10 @@
+# Run the published ghcr.io images (arm64) instead of building locally.
+# `docker compose up -d` merges this over docker-compose.yml automatically.
+services:
+  controlplane:
+    build: !reset null
+    image: ghcr.io/josephfell/jbalance-controlplane:main
+
+  dataplane:
+    build: !reset null
+    image: ghcr.io/josephfell/jbalance-dataplane:main

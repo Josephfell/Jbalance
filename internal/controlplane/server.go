@@ -301,6 +301,18 @@ func (s *Server) publishRoutes() {
 				AddPathPrefix:         r.Rewrite.AddPathPrefix,
 			}
 		}
+		var auth *pb.RouteAuth
+		if r.Auth != nil && r.Auth.Mode != "" && r.Auth.Mode != "none" {
+			auth = &pb.RouteAuth{
+				Mode:             r.Auth.Mode,
+				ApiKeys:          r.Auth.APIKeys,
+				ApiKeyHeader:     r.Auth.APIKeyHeader,
+				HmacSecret:       r.Auth.HMACSecret,
+				RsaPublicKeyPem:  r.Auth.RSAPublicKeyPEM,
+				ExpectedIssuer:   r.Auth.ExpectedIssuer,
+				ExpectedAudience: r.Auth.ExpectedAudience,
+			}
+		}
 		table.Routes = append(table.Routes, &pb.Route{
 			Host:        r.Host,
 			PathPrefix:  r.PathPrefix,
@@ -309,6 +321,7 @@ func (s *Server) publishRoutes() {
 			Name:        r.Name,
 			Split:       split,
 			Rewrite:     rewrite,
+			Auth:        auth,
 		})
 	}
 

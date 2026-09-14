@@ -36,6 +36,9 @@ type Route struct {
 	// Rewrite holds optional request/response transformations applied
 	// when this rule matches. Nil/zero means no rewrite.
 	Rewrite *RouteRewrite `json:"rewrite,omitempty"`
+	// Auth, when set, requires matched requests to authenticate (API key
+	// or JWT) before being proxied. Nil = open route.
+	Auth *RouteAuth `json:"auth,omitempty"`
 }
 
 // RouteRewrite describes header and path transformations applied to a
@@ -47,6 +50,18 @@ type RouteRewrite struct {
 	RemoveResponseHeaders []string          `json:"removeResponseHeaders,omitempty"`
 	StripPathPrefix       string            `json:"stripPathPrefix,omitempty"`
 	AddPathPrefix         string            `json:"addPathPrefix,omitempty"`
+}
+
+// RouteAuth is the control-plane form of edge authentication for a route.
+// Mirrors proto.RouteAuth.
+type RouteAuth struct {
+	Mode             string   `json:"mode"` // none|api_key|jwt
+	APIKeys          []string `json:"apiKeys,omitempty"`
+	APIKeyHeader     string   `json:"apiKeyHeader,omitempty"`
+	HMACSecret       string   `json:"hmacSecret,omitempty"`
+	RSAPublicKeyPEM  string   `json:"rsaPublicKeyPem,omitempty"`
+	ExpectedIssuer   string   `json:"expectedIssuer,omitempty"`
+	ExpectedAudience string   `json:"expectedAudience,omitempty"`
 }
 
 // RouteTarget is one weighted destination of a split (canary) route rule.

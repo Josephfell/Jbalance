@@ -7,6 +7,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.0
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5 v5.7.0
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6 v6.2.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/prometheus/client_golang v1.24.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0
 	go.opentelemetry.io/otel v1.46.0
@@ -51,7 +52,6 @@ require (
 	github.com/go-openapi/swag/typeutils v0.28.0 // indirect
 	github.com/go-openapi/swag/yamlutils v0.28.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/gnostic-models v0.6.8 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
