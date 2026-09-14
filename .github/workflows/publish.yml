@@ -1,0 +1,73 @@
+name: Publish images
+
+# Builds and publishes both container images to the GitHub Container
+# Registry (ghcr.io) so they can be pulled and deployed.
+#
+# Triggers:
+#   - Pushing a version tag (v1.2.3) publishes release images tagged with
+#     the semver (v1.2.3, 1.2, 1) plus `latest`.
+#   - A manual run (workflow_dispatch) publishes an image tagged with the
+#     short commit SHA and the branch name — useful for ad-hoc/test builds
+#     without cutting a release tag.
+#
+# Auth uses the automatic GITHUB_TOKEN — no Docker Hub account or manually
+# managed registry secret is required. Images land under
+# ghcr.io/<owner>/jbalance-controlplane and .../jbalance-dataplane.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.binary }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # required to push to ghcr.io
+    strategy:
+      matrix:
+        binary: [controlplane, dataplane]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ${{ env.REGISTRY }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derives tags and labels from the git ref: semver tags on a release,
+      # branch name + short SHA on a manual dispatch. `latest` is only
+      # applied on a tagged release, never on an ad-hoc dispatch build.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/jbalance-${{ matrix.binary }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=ref,event=branch
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: cmd/${{ matrix.binary }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
