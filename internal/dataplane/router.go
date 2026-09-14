@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"math/rand"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,29 @@ type route struct {
 	// matching request is sent to one of them chosen by weight, rather
 	// than always to targetGroup. Used for canary / traffic-splitting.
 	split []routeTarget
+	// rewrite holds optional request/response transformations applied
+	// when this rule matches. Zero value is a no-op.
+	rewrite routeRewrite
+}
+
+// routeRewrite is the data plane's local form of pb.RouteRewrite.
+type routeRewrite struct {
+	setRequestHeaders     map[string]string
+	removeRequestHeaders  []string
+	setResponseHeaders    map[string]string
+	removeResponseHeaders []string
+	stripPathPrefix       string
+	addPathPrefix         string
+}
+
+// isZero reports whether the rewrite has no effect.
+func (rw routeRewrite) isZero() bool {
+	return len(rw.setRequestHeaders) == 0 &&
+		len(rw.removeRequestHeaders) == 0 &&
+		len(rw.setResponseHeaders) == 0 &&
+		len(rw.removeResponseHeaders) == 0 &&
+		rw.stripPathPrefix == "" &&
+		rw.addPathPrefix == ""
 }
 
 // routeTarget is one weighted destination of a split route.
@@ -112,6 +136,7 @@ func (t *RouteTable) Update(table *pb.RouteTable) {
 			methods:     r.Methods,
 			targetGroup: r.TargetGroup,
 			split:       split,
+			rewrite:     rewriteFromProto(r.Rewrite),
 		})
 	}
 	t.routes = routes
@@ -124,6 +149,14 @@ func (t *RouteTable) Update(table *pb.RouteTable) {
 // split — one of the split targets chosen by weight. Falls back to the
 // data plane's default group if no rule matches.
 func (t *RouteTable) Resolve(host, path, method string) string {
+	group, _ := t.ResolveRoute(host, path, method)
+	return group
+}
+
+// ResolveRoute is Resolve plus the matched rule's rewrite. The returned
+// rewrite is the zero value (a no-op) when no rule matched or the matched
+// rule configured no rewrites.
+func (t *RouteTable) ResolveRoute(host, path, method string) (string, routeRewrite) {
 	t.mu.RLock()
 	var matched *route
 	for i := range t.routes {
@@ -132,15 +165,73 @@ func (t *RouteTable) Resolve(host, path, method string) string {
 			break
 		}
 	}
+	group := ""
+	var rw routeRewrite
+	if matched != nil {
+		rw = matched.rewrite
+		if len(matched.split) == 0 {
+			group = matched.targetGroup
+		} else {
+			group = t.pickSplit(matched.split)
+		}
+	}
 	t.mu.RUnlock()
 
 	if matched == nil {
-		return t.defaultGroup
+		return t.defaultGroup, routeRewrite{}
 	}
-	if len(matched.split) == 0 {
-		return matched.targetGroup
+	return group, rw
+}
+
+// rewriteFromProto converts a pb.RouteRewrite (possibly nil) into the
+// local routeRewrite form.
+func rewriteFromProto(rw *pb.RouteRewrite) routeRewrite {
+	if rw == nil {
+		return routeRewrite{}
 	}
-	return t.pickSplit(matched.split)
+	return routeRewrite{
+		setRequestHeaders:     rw.SetRequestHeaders,
+		removeRequestHeaders:  rw.RemoveRequestHeaders,
+		setResponseHeaders:    rw.SetResponseHeaders,
+		removeResponseHeaders: rw.RemoveResponseHeaders,
+		stripPathPrefix:       rw.StripPathPrefix,
+		addPathPrefix:         rw.AddPathPrefix,
+	}
+}
+
+// applyRequest mutates the outbound request per the rewrite: strips/adds a
+// path prefix and sets/removes request headers. Called before the request
+// is proxied to the backend.
+func (rw routeRewrite) applyRequest(r *http.Request) {
+	if rw.isZero() {
+		return
+	}
+	if rw.stripPathPrefix != "" && strings.HasPrefix(r.URL.Path, rw.stripPathPrefix) {
+		r.URL.Path = r.URL.Path[len(rw.stripPathPrefix):]
+		if r.URL.Path == "" || r.URL.Path[0] != '/' {
+			r.URL.Path = "/" + r.URL.Path
+		}
+	}
+	if rw.addPathPrefix != "" {
+		r.URL.Path = rw.addPathPrefix + r.URL.Path
+	}
+	for name, val := range rw.setRequestHeaders {
+		r.Header.Set(name, val)
+	}
+	for _, name := range rw.removeRequestHeaders {
+		r.Header.Del(name)
+	}
+}
+
+// applyResponse mutates the backend response's headers per the rewrite,
+// before it is written back to the client.
+func (rw routeRewrite) applyResponse(h http.Header) {
+	for name, val := range rw.setResponseHeaders {
+		h.Set(name, val)
+	}
+	for _, name := range rw.removeResponseHeaders {
+		h.Del(name)
+	}
 }
 
 // pickSplit chooses one target from a weighted split. A single-entry

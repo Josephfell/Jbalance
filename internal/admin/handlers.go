@@ -380,11 +380,14 @@ type routeRow struct {
 	TargetGroup string
 	Split       string
 	Name        string
+	StripPrefix string
+	ReqHeaders  string
 }
 
 func routesToRows(routes []controlplane.Route) []routeRow {
 	rows := make([]routeRow, len(routes))
 	for i, r := range routes {
+		strip, reqHdrs := formatRewrite(r.Rewrite)
 		rows[i] = routeRow{
 			Order:       i,
 			Host:        r.Host,
@@ -393,6 +396,8 @@ func routesToRows(routes []controlplane.Route) []routeRow {
 			TargetGroup: r.TargetGroup,
 			Split:       formatSplit(r.Split),
 			Name:        r.Name,
+			StripPrefix: strip,
+			ReqHeaders:  reqHdrs,
 		}
 	}
 	return rows
@@ -457,6 +462,8 @@ func (s *Server) handleRoutesSubmit(w http.ResponseWriter, r *http.Request) {
 	names := r.Form["name"]
 	actions := r.Form["action"]
 	splits := r.Form["split"]
+	stripPrefixes := r.Form["strip_prefix"]
+	reqHeaders := r.Form["req_headers"]
 
 	n := len(hosts)
 	type indexed struct {
@@ -482,6 +489,7 @@ func (s *Server) handleRoutesSubmit(w http.ResponseWriter, r *http.Request) {
 				TargetGroup: targetGroup,
 				Split:       parseSplit(valueAt(splits, i)),
 				Name:        valueAt(names, i),
+				Rewrite:     parseRewrite(valueAt(stripPrefixes, i), valueAt(reqHeaders, i)),
 			},
 		})
 	}
@@ -588,6 +596,69 @@ func formatSplit(targets []controlplane.RouteTarget) string {
 		parts = append(parts, t.Group+":"+strconv.Itoa(int(w)))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// parseRewrite builds a RouteRewrite from the two admin-form fields:
+// stripPrefix (a literal path prefix to strip before proxying) and
+// reqHeaders (one "Name: value" per line to SET, or "-Name" on its own
+// line to REMOVE). Returns nil when both are empty, so a rule with no
+// rewrite stays nil rather than an empty struct.
+func parseRewrite(stripPrefix, reqHeaders string) *controlplane.RouteRewrite {
+	stripPrefix = strings.TrimSpace(stripPrefix)
+	set := map[string]string{}
+	var remove []string
+	for _, line := range strings.Split(reqHeaders, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "-") {
+			if name := strings.TrimSpace(line[1:]); name != "" {
+				remove = append(remove, name)
+			}
+			continue
+		}
+		if i := strings.Index(line, ":"); i > 0 {
+			name := strings.TrimSpace(line[:i])
+			val := strings.TrimSpace(line[i+1:])
+			if name != "" {
+				set[name] = val
+			}
+		}
+	}
+	if stripPrefix == "" && len(set) == 0 && len(remove) == 0 {
+		return nil
+	}
+	rw := &controlplane.RouteRewrite{StripPathPrefix: stripPrefix}
+	if len(set) > 0 {
+		rw.SetRequestHeaders = set
+	}
+	if len(remove) > 0 {
+		rw.RemoveRequestHeaders = remove
+	}
+	return rw
+}
+
+// formatRewrite renders a RouteRewrite back into the two editor fields
+// (strip-prefix string, req-headers text) so a saved rewrite round-trips.
+func formatRewrite(rw *controlplane.RouteRewrite) (stripPrefix, reqHeaders string) {
+	if rw == nil {
+		return "", ""
+	}
+	var lines []string
+	// Stable order for round-trip: sort set-header names.
+	names := make([]string, 0, len(rw.SetRequestHeaders))
+	for name := range rw.SetRequestHeaders {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		lines = append(lines, name+": "+rw.SetRequestHeaders[name])
+	}
+	for _, name := range rw.RemoveRequestHeaders {
+		lines = append(lines, "-"+name)
+	}
+	return rw.StripPathPrefix, strings.Join(lines, "\n")
 }
 
 // metricsChartPoint is the small JSON shape the dashboard's chart JS

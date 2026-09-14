@@ -132,6 +132,31 @@ message Route {
   // rather than always to target_group. When empty, target_group is
   // used. A single-entry split is equivalent to target_group.
   repeated RouteTarget split = 6;
+
+  // Request/response rewrites applied when this rule matches, before the
+  // request is proxied. All are optional; an empty rewrite is a no-op.
+  RouteRewrite rewrite = 7;
+}
+
+// RouteRewrite describes header and path transformations applied to a
+// matched request (and its response). Every field is optional.
+message RouteRewrite {
+  // Request headers to set (overwriting any existing value). Map of
+  // header name -> value.
+  map<string, string> set_request_headers = 1;
+  // Request header names to remove before proxying to the backend.
+  repeated string remove_request_headers = 2;
+  // Response headers to set on the way back to the client.
+  map<string, string> set_response_headers = 3;
+  // Response header names to remove from the backend's response.
+  repeated string remove_response_headers = 4;
+  // If non-empty, this literal prefix is stripped from the request path
+  // before proxying (e.g. strip "/api" so the backend sees "/v1/x" for a
+  // request to "/api/v1/x"). Applied before add_path_prefix.
+  string strip_path_prefix = 5;
+  // If non-empty, this literal prefix is prepended to the request path
+  // before proxying. Applied after strip_path_prefix.
+  string add_path_prefix = 6;
 }
 
 // RouteTarget is one weighted destination of a canary/split route rule.

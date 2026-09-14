@@ -33,6 +33,20 @@ type Route struct {
 	Split []RouteTarget `json:"split,omitempty"`
 	// Name is a display label for the admin UI; not evaluated.
 	Name string `json:"name,omitempty"`
+	// Rewrite holds optional request/response transformations applied
+	// when this rule matches. Nil/zero means no rewrite.
+	Rewrite *RouteRewrite `json:"rewrite,omitempty"`
+}
+
+// RouteRewrite describes header and path transformations applied to a
+// matched request. Mirrors proto.RouteRewrite; all fields optional.
+type RouteRewrite struct {
+	SetRequestHeaders     map[string]string `json:"setRequestHeaders,omitempty"`
+	RemoveRequestHeaders  []string          `json:"removeRequestHeaders,omitempty"`
+	SetResponseHeaders    map[string]string `json:"setResponseHeaders,omitempty"`
+	RemoveResponseHeaders []string          `json:"removeResponseHeaders,omitempty"`
+	StripPathPrefix       string            `json:"stripPathPrefix,omitempty"`
+	AddPathPrefix         string            `json:"addPathPrefix,omitempty"`
 }
 
 // RouteTarget is one weighted destination of a split (canary) route rule.
