@@ -532,6 +532,27 @@ requests with a body (which includes gRPC calls) are never retried, so a
 connection-level failure surfaces to the client rather than being silently
 replayed.
 
+## WebSocket and streaming (SSE)
+
+The L7 proxy handles **protocol upgrades** (WebSocket, and any
+`Connection: Upgrade` handshake) and **streaming responses** (Server-Sent
+Events, chunked/streaming bodies) natively:
+
+- An upgrade request is proxied over a hijacked, bidirectionally-piped
+  connection for its whole lifetime, and is explicitly excluded from the
+  buffered retry path (an upgrade is a stateful handshake that can't be
+  replayed or buffered) — so WebSocket traffic flows straight through to
+  the resolved group's backend.
+- Responses are flushed to the client as they are produced
+  (`FlushInterval = -1`), so an SSE stream or any long-lived streaming
+  response reaches the client incrementally rather than being held until
+  the backend closes it.
+
+Both work through the same group resolution, health checking, and
+load-balancing as ordinary requests; a backend is selected once per
+connection (as with L4/TCP), since an upgraded connection has no
+per-request boundary to re-balance on.
+
 ## Health checking
 
 Every data plane instance probes each of its backends on a timer and takes

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -154,6 +155,14 @@ func NewProxy(routes *RouteTable, groups *GroupManager, metrics *Metrics, cfg Pr
 
 	p.rp = &httputil.ReverseProxy{
 		Transport: transport,
+		// FlushInterval -1 flushes each write to the client immediately
+		// rather than buffering, so streaming responses (Server-Sent
+		// Events, chunked streams, gRPC streaming) reach the client as they
+		// are produced instead of being held. Go's ReverseProxy already
+		// force-flushes text/event-stream, but -1 covers every streaming
+		// content type uniformly. It does not affect ordinary buffered
+		// responses meaningfully.
+		FlushInterval: -1,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			addr, _ := pr.In.Context().Value(backendAddrKey).(string)
 			pr.SetURL(&url.URL{Scheme: "http", Host: addr})
@@ -333,6 +342,13 @@ func (p *Proxy) serveOnce(w http.ResponseWriter, r *http.Request, addr string, b
 // excludes any request with a body, even a GET with one, since the body
 // stream is already consumed after the first attempt.
 func requestRetryable(r *http.Request) bool {
+	// An upgrade request (WebSocket, or any Connection: Upgrade) must never
+	// be buffered/retried: the buffered retry writer can't hijack the
+	// connection, and the upgrade is a stateful handshake that can't be
+	// replayed against a different backend. Let it flow straight through.
+	if requestIsUpgrade(r) {
+		return false
+	}
 	if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
 		return false
 	}
@@ -342,6 +358,21 @@ func requestRetryable(r *http.Request) bool {
 	default:
 		return false
 	}
+}
+
+// requestIsUpgrade reports whether the request is asking to switch
+// protocols (WebSocket etc.) — i.e. it carries a Connection: Upgrade
+// token. Such requests are proxied by Go's ReverseProxy via a hijacked,
+// bidirectionally-piped connection and must bypass the buffered retry path.
+func requestIsUpgrade(r *http.Request) bool {
+	for _, v := range r.Header.Values("Connection") {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "upgrade") {
+				return r.Header.Get("Upgrade") != ""
+			}
+		}
+	}
+	return false
 }
 
 // selectBackend picks the backend to proxy this request to: if the group
