@@ -148,13 +148,27 @@ func (p *TCPProxy) Drain(grace time.Duration) bool {
 	}
 }
 
+// tcpClientIP returns the client connection's remote IP (without port),
+// used as the consistent-hash key. Falls back to the full RemoteAddr
+// string if it can't be split.
+func tcpClientIP(client net.Conn) string {
+	addr := client.RemoteAddr().String()
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
+}
+
 func (p *TCPProxy) handleConn(ctx context.Context, client net.Conn) {
 	// The connection was already counted in Serve via connStarted before
 	// this goroutine launched; balance it here.
 	defer p.connFinished()
 	defer func() { _ = client.Close() }()
 
-	addr, ok := p.backends.Next()
+	// Consistent-hash (if selected) keys on the client IP, which works in
+	// L4 mode too — a genuine advantage over cookie-based stickiness, which
+	// can't exist at this layer. Other algorithms ignore the key.
+	addr, ok := p.backends.NextForKey(tcpClientIP(client))
 	if !ok {
 		slog.Warn("tcp proxy: no healthy backends available, closing connection", "component", "dataplane", "client", client.RemoteAddr().String())
 		return

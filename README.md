@@ -189,11 +189,23 @@ persistent volume.
 **Load-balancing algorithm selection.** Each group on the dashboard has an
 algorithm dropdown — **round_robin** (weighted, the default),
 **least_connections** (weighted by outstanding in-flight requests per
-backend), or **random** (weighted). Changing it takes effect immediately
-across every data plane subscribed to that group. The selection is stored
-in a local JSON file (`-admin-algorithms-path`, default
+backend), **random** (weighted), **p2c** (power of two choices), or
+**consistent_hash**. Changing it takes effect immediately across every data
+plane subscribed to that group. The selection is stored in a local JSON
+file (`-admin-algorithms-path`, default
 `/var/lib/go-loadbalancer/algorithms.json`), per group, and defaults to
 round_robin for any group with no explicit selection.
+
+- **p2c** picks two backends at random and sends to whichever has fewer
+  in-flight requests. It approximates `least_connections` at O(1) cost per
+  selection and avoids the herding that pure least-connections can cause
+  when several selectors simultaneously spot the same idle backend.
+- **consistent_hash** routes by a hash of the client IP onto a hash ring
+  (weighted via virtual nodes), so the same client consistently lands on
+  the same backend — useful for cache affinity, and a cookieless
+  alternative to sticky sessions that **also works in L4/`tcp` mode**. When
+  a backend joins or leaves, only a small fraction of clients remap. A
+  request with no usable key falls back to round robin.
 
 **First run:** a random password is generated and printed exactly once to
 the process log, in a clearly marked block:
