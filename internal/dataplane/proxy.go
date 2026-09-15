@@ -411,7 +411,7 @@ func requestIsUpgrade(r *http.Request) bool {
 func selectBackend(w http.ResponseWriter, r *http.Request, backends *BackendList) (string, bool) {
 	sticky := backends.Sticky()
 	if !sticky.Enabled {
-		return backends.Next()
+		return backends.NextForKey(clientIP(r))
 	}
 
 	cookieName := sticky.CookieName
@@ -429,7 +429,7 @@ func selectBackend(w http.ResponseWriter, r *http.Request, backends *BackendList
 		// rather than failing the request outright.
 	}
 
-	addr, ok := backends.Next()
+	addr, ok := backends.NextForKey(clientIP(r))
 	if !ok {
 		return "", false
 	}

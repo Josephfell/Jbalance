@@ -3,6 +3,8 @@ package dataplane
 import (
 	"log/slog"
 	"math/rand"
+	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,6 +21,8 @@ const (
 	AlgorithmRoundRobin       Algorithm = "round_robin"
 	AlgorithmLeastConnections Algorithm = "least_connections"
 	AlgorithmRandom           Algorithm = "random"
+	AlgorithmP2C              Algorithm = "p2c"
+	AlgorithmConsistentHash   Algorithm = "consistent_hash"
 )
 
 // backendEntry is one upstream target along with its expanded weight slots
@@ -220,6 +224,10 @@ func normalizeAlgorithm(s string) Algorithm {
 		return AlgorithmLeastConnections
 	case AlgorithmRandom:
 		return AlgorithmRandom
+	case AlgorithmP2C:
+		return AlgorithmP2C
+	case AlgorithmConsistentHash:
+		return AlgorithmConsistentHash
 	default:
 		return AlgorithmRoundRobin
 	}
@@ -398,6 +406,15 @@ func (b *BackendList) rebuildSlotsLocked() {
 // reflects in-flight requests. For the other algorithms, calling Release
 // is harmless but unnecessary.
 func (b *BackendList) Next() (string, bool) {
+	return b.NextForKey("")
+}
+
+// NextForKey is Next with a per-request key used only by the
+// consistent_hash algorithm (hash the key onto the ring). For every other
+// algorithm the key is ignored, so callers that don't care can use Next().
+// When consistent_hash is selected but key is empty, it falls back to
+// round robin so a request with no usable key still gets a backend.
+func (b *BackendList) NextForKey(key string) (string, bool) {
 	// Fast path: if an ejection window has lapsed since the last rebuild,
 	// re-admit the backend(s) by rebuilding the slot list. Checked under
 	// the read lock; the rebuild itself takes the write lock.
@@ -429,6 +446,13 @@ func (b *BackendList) Next() (string, bool) {
 		return b.nextLeastConnections(entries, slots)
 	case AlgorithmRandom:
 		return b.nextRandom(entries, slots)
+	case AlgorithmP2C:
+		return b.nextP2C(entries, slots)
+	case AlgorithmConsistentHash:
+		if key == "" {
+			return b.nextRoundRobin(entries, slots)
+		}
+		return b.nextConsistentHash(entries, slots, key)
 	default:
 		return b.nextRoundRobin(entries, slots)
 	}
@@ -493,7 +517,108 @@ func (b *BackendList) nextLeastConnections(entries []*backendEntry, slots []int)
 	return best.address, true
 }
 
-// Release decrements the active-connection count for address, signalling
+// nextP2C implements "power of two choices": pick two distinct slots at
+// random and send to whichever backend has the lower weight-adjusted
+// in-flight load. This approximates least_connections at O(1) cost and
+// avoids the herding that pure least_connections can cause when several
+// selectors simultaneously spot the same idle backend. Like
+// least_connections, the caller must Release the returned address when the
+// request completes so the in-flight count stays accurate.
+func (b *BackendList) nextP2C(entries []*backendEntry, slots []int) (string, bool) {
+	load := func(e *backendEntry) float64 {
+		w := e.weight
+		if w <= 0 {
+			w = 1
+		}
+		return float64(e.activeConns.Load()) / float64(w)
+	}
+
+	b.rngMu.Lock()
+	i := b.rng.Intn(len(slots))
+	j := i
+	if len(slots) > 1 {
+		// Pick a second, distinct slot.
+		j = b.rng.Intn(len(slots) - 1)
+		if j >= i {
+			j++
+		}
+	}
+	b.rngMu.Unlock()
+
+	a := entries[slots[i]]
+	c := entries[slots[j]]
+	best := a
+	if load(c) < load(a) {
+		best = c
+	}
+	best.activeConns.Add(1)
+	return best.address, true
+}
+
+// nextConsistentHash routes key onto a hash ring built from the currently
+// healthy backends (weighted via virtual nodes), returning the backend
+// owning the first ring point at or after hash(key). The same key lands on
+// the same backend as long as the healthy set is stable, and only a
+// 1/N-ish fraction of keys move when a backend joins or leaves — the
+// property that makes this good for cache affinity. The ring is rebuilt
+// from the slot list on each call; slot lists are small (bounded by the
+// group size × weight) so this stays cheap.
+func (b *BackendList) nextConsistentHash(entries []*backendEntry, slots []int, key string) (string, bool) {
+	const vnodesPerUnitWeight = 40 // more virtual nodes = smoother key distribution
+
+	// Distinct healthy backends (slots may repeat an index per weight).
+	seen := make(map[int]bool, len(slots))
+	type ringPoint struct {
+		hash uint32
+		slot int
+	}
+	var ring []ringPoint
+	for _, slot := range slots {
+		if seen[slot] {
+			continue
+		}
+		seen[slot] = true
+		e := entries[slot]
+		w := e.weight
+		if w <= 0 {
+			w = 1
+		}
+		vnodes := int(w) * vnodesPerUnitWeight
+		for v := 0; v < vnodes; v++ {
+			ring = append(ring, ringPoint{hash: hashKey(e.address + "#" + strconv.Itoa(v)), slot: slot})
+		}
+	}
+	if len(ring) == 0 {
+		return "", false
+	}
+	sort.Slice(ring, func(i, j int) bool { return ring[i].hash < ring[j].hash })
+
+	h := hashKey(key)
+	// First ring point with hash >= h; wrap to ring[0] if past the end.
+	idx := sort.Search(len(ring), func(i int) bool { return ring[i].hash >= h })
+	if idx == len(ring) {
+		idx = 0
+	}
+	entry := entries[ring[idx].slot]
+	entry.activeConns.Add(1)
+	return entry.address, true
+}
+
+// hashKey is a small, fast, non-cryptographic 32-bit hash (FNV-1a) used
+// only for consistent-hash ring placement — not security-sensitive.
+func hashKey(s string) uint32 {
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	h := uint32(offset32)
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= prime32
+	}
+	return h
+}
+
 // that a request proxied to it has completed. Only meaningful for
 // least_connections selection; safe (and cheap) to call regardless of the
 // currently active algorithm. A no-op if address is not currently known.

@@ -16,11 +16,21 @@ const (
 	AlgorithmRoundRobin       Algorithm = "round_robin"
 	AlgorithmLeastConnections Algorithm = "least_connections"
 	AlgorithmRandom           Algorithm = "random"
+	// AlgorithmP2C is "power of two choices": pick two backends at random
+	// and send to whichever has fewer in-flight requests. Gets most of the
+	// benefit of least_connections while avoiding herding onto a single
+	// momentarily-idle backend, at O(1) cost per selection.
+	AlgorithmP2C Algorithm = "p2c"
+	// AlgorithmConsistentHash routes by a hash of a per-request key (client
+	// IP by default) onto a hash ring, so the same key consistently lands
+	// on the same backend — useful for cache affinity. Falls back to round
+	// robin when no key is available (e.g. a request with no client IP).
+	AlgorithmConsistentHash Algorithm = "consistent_hash"
 )
 
 // ValidAlgorithms lists every algorithm the data plane knows how to
 // implement, in the order they should be presented in the admin UI.
-var ValidAlgorithms = []Algorithm{AlgorithmRoundRobin, AlgorithmLeastConnections, AlgorithmRandom}
+var ValidAlgorithms = []Algorithm{AlgorithmRoundRobin, AlgorithmLeastConnections, AlgorithmRandom, AlgorithmP2C, AlgorithmConsistentHash}
 
 // IsValidAlgorithm reports whether a is one of ValidAlgorithms.
 func IsValidAlgorithm(a Algorithm) bool {
