@@ -140,6 +140,36 @@ message Route {
   // Edge authentication required on matched requests, checked before the
   // request is proxied to a backend. Nil/unset means no auth (open route).
   RouteAuth auth = 8;
+
+  // Additional request-header conditions that must ALL match (AND
+  // semantics) on top of host/path/method. Empty means no header
+  // condition. Lets a rule route on e.g. `X-Api-Version: 2` or the
+  // presence of a header regardless of value.
+  repeated HeaderMatch header_matches = 9;
+
+  // Additional query-parameter conditions that must ALL match (AND
+  // semantics). Empty means no query condition. Lets a rule route on
+  // e.g. `?canary=true` or the presence of a `debug` parameter.
+  repeated QueryMatch query_matches = 10;
+}
+
+// HeaderMatch is one request-header condition on a route. The named
+// header must be present; when value is non-empty it must also equal
+// value (case-insensitive on the header name per HTTP; the value
+// comparison is case-sensitive). When value is empty, mere presence of
+// the header satisfies the condition.
+message HeaderMatch {
+  string name = 1;
+  string value = 2;
+}
+
+// QueryMatch is one query-parameter condition on a route. The named
+// query parameter must be present; when value is non-empty it must also
+// equal value (both name and value compared case-sensitively, as query
+// strings are). When value is empty, mere presence satisfies it.
+message QueryMatch {
+  string name = 1;
+  string value = 2;
 }
 
 // RouteRewrite describes header and path transformations applied to a

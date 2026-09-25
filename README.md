@@ -11,7 +11,8 @@ xDS, Istio) use:
   modes, selected by `-protocol`:
   - **`http`** (default): an L7 reverse proxy. Every instance has a default
     backend group (`-group`), but a global route table can send different
-    requests (by host, path prefix, and/or method) to other groups —
+    requests (by host, path prefix, method, and/or request header and
+    query-parameter matches) to other groups —
     including weighted **canary splits** — and per matched route can
     **rewrite** the request (strip/add a path prefix, set/remove headers)
     and require **edge authentication** (API key or JWT) before proxying.
@@ -332,6 +333,9 @@ Each rule matches on:
   every path. Not a pattern language — deliberately simple for a first cut.
 - **Methods** — a comma-separated list (e.g. `GET, POST`); blank matches
   any method.
+- **Header / query matches** — optional extra conditions that must *all*
+  hold on top of host/path/method (see below); blank means no such
+  condition.
 
 and, if matched, sends the request to the rule's **target group** instead
 of the instance's default. Rules are evaluated top to bottom; the first
@@ -352,6 +356,30 @@ like any other routed group, so pointing 10% of traffic at a brand-new
 canary group needs no restart. To shift the rollout, just change the
 weights and save; to finish it, blank the split and point the target
 group at the promoted version.
+
+**Header / query-parameter matching.** Beyond host/path/method, a rule can
+require specific request **headers** and/or **query parameters**, entered
+in the routes editor's **Match (header/query)** field — one condition per
+line. All conditions on a rule (including its host/path/method) must hold
+for the rule to match (AND semantics), so this is how you route two
+requests to the *same* path to different groups based on a header or a
+flag. Syntax:
+
+| Line | Matches when |
+|------|--------------|
+| `header:X-Api-Version: 2` | request header `X-Api-Version` equals `2` |
+| `header:X-Debug` | request header `X-Debug` is present (any value) |
+| `query:canary=true` | query parameter `canary` equals `true` |
+| `query:debug` | query parameter `debug` is present (any value) |
+
+A bare `Name: value` line with no `header:`/`query:` prefix is treated as a
+header condition. Header-name matching is case-insensitive (per HTTP);
+header values and all query comparisons are case-sensitive. Typical uses:
+send `X-Api-Version: 2` callers to a new backend group while everyone else
+falls through to the current one, or gate a canary group behind a
+`?canary=true` flag. Like every other route field, these conditions live
+in the global route table and take effect the moment the table is saved —
+no restart, no per-instance config.
 
 The route table is global (not per-group) and pushed to every connected
 data plane instance the moment it's saved, over its own gRPC stream

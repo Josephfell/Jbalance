@@ -3,6 +3,8 @@ package controlplane
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 )
@@ -37,6 +39,29 @@ type Route struct {
 	// Auth, when set, requires matched requests to authenticate (API key
 	// or JWT) before being proxied. Nil = open route.
 	Auth *RouteAuth `json:"auth,omitempty"`
+	// HeaderMatches are extra request-header conditions that must ALL
+	// hold (AND) on top of Host/PathPrefix/Methods. Empty means no header
+	// condition.
+	HeaderMatches []HeaderMatch `json:"headerMatches,omitempty"`
+	// QueryMatches are extra query-parameter conditions that must ALL
+	// hold (AND). Empty means no query condition.
+	QueryMatches []QueryMatch `json:"queryMatches,omitempty"`
+}
+
+// HeaderMatch is one request-header condition on a route. Name is the
+// header to check; when Value is non-empty the header's value must equal
+// it (case-sensitive), otherwise mere presence of the header satisfies
+// the condition. Mirrors proto.HeaderMatch.
+type HeaderMatch struct {
+	Name  string `json:"name"`
+	Value string `json:"value,omitempty"`
+}
+
+// QueryMatch is one query-parameter condition on a route, with the same
+// present-or-equals semantics as HeaderMatch. Mirrors proto.QueryMatch.
+type QueryMatch struct {
+	Name  string `json:"name"`
+	Value string `json:"value,omitempty"`
 }
 
 // RouteRewrite describes header and path transformations applied to a
@@ -75,6 +100,11 @@ type RouteTarget struct {
 // host, path, and method. Host comparison is case-insensitive (matching
 // HTTP's own treatment of host names); path prefix comparison is exact
 // (paths are case-sensitive per the HTTP spec).
+//
+// It evaluates only host/path/method. Header and query-parameter
+// conditions (HeaderMatches/QueryMatches) are evaluated by the data
+// plane, which has the live *http.Request; MatchesRequest layers those
+// on top for callers that do have the request in hand.
 func (r Route) Matches(host, path, method string) bool {
 	if r.Host != "" && r.Host != "*" && !strings.EqualFold(r.Host, host) {
 		return false
@@ -95,6 +125,69 @@ func (r Route) Matches(host, path, method string) bool {
 		}
 	}
 	return true
+}
+
+// MatchesRequest is Matches plus the HeaderMatches and QueryMatches
+// conditions, all of which must hold (AND). header/query may be nil,
+// which satisfies a route that declares no header/query conditions and
+// fails one that does.
+func (r Route) MatchesRequest(host, path, method string, header http.Header, query url.Values) bool {
+	if !r.Matches(host, path, method) {
+		return false
+	}
+	for _, hm := range r.HeaderMatches {
+		if !headerMatches(header, hm.Name, hm.Value) {
+			return false
+		}
+	}
+	for _, qm := range r.QueryMatches {
+		if !queryMatches(query, qm.Name, qm.Value) {
+			return false
+		}
+	}
+	return true
+}
+
+// headerMatches reports whether header has name present, and — when want
+// is non-empty — with a value equal to want. Header-name lookup is
+// case-insensitive (http.Header.Get canonicalises); the value comparison
+// is case-sensitive. An empty want matches on mere presence.
+func headerMatches(header http.Header, name, want string) bool {
+	if header == nil {
+		return false
+	}
+	if want == "" {
+		return len(header.Values(name)) > 0
+	}
+	for _, v := range header.Values(name) {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+// queryMatches reports whether query has name present, and — when want is
+// non-empty — with a value equal to want. Both name and value are
+// compared case-sensitively (query strings are case-sensitive). An empty
+// want matches on mere presence.
+func queryMatches(query url.Values, name, want string) bool {
+	if query == nil {
+		return false
+	}
+	vals, ok := query[name]
+	if !ok {
+		return false
+	}
+	if want == "" {
+		return true
+	}
+	for _, v := range vals {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // RouteStore holds the global L7 route table, persisted to a single local
