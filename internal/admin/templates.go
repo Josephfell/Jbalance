@@ -226,9 +226,20 @@ const templatesSource = `
   .chart-svg { width: 100%; height: 220px; display: block; overflow: visible; }
   .chart-gridline { stroke: var(--border-soft); stroke-width: 1; }
   .chart-gridline--base { stroke: var(--border); }
-  .chart-area { fill: color-mix(in srgb, var(--accent) 16%, transparent); stroke: none; }
-  .chart-line { fill: none; stroke: var(--accent); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+  .chart-area { fill: color-mix(in srgb, var(--accent) 16%, transparent); stroke: none; transition: d 0.5s ease; }
+  .chart-line { fill: none; stroke: var(--accent); stroke-width: 1.6; vector-effect: non-scaling-stroke; transition: d 0.5s ease; }
   .chart-empty { font-size: 12.5px; color: var(--text-faint); text-align: center; padding: 12px 0 2px; }
+  /* dynamic key: live value + window stats for the selected metric */
+  .chart-key { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: baseline; margin: 12px 0 2px; font-size: 12px; }
+  .chart-key-item { display: flex; align-items: baseline; gap: 6px; }
+  .chart-key-label { color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; font-size: 10.5px; }
+  .chart-key-val { font-family: var(--mono); color: var(--text); font-size: 14px; font-weight: 600; transition: color 0.25s ease; }
+  .chart-key-val--now { color: var(--accent); font-size: 17px; }
+  .chart-key-swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--accent); display: inline-block; }
+  /* subtle pulse on the live value only when a fresh sample lands — not a full-panel flash */
+  @keyframes jb-pulse { 0% { transform: scale(1.12); } 100% { transform: scale(1); } }
+  .jb-pulse { display: inline-block; animation: jb-pulse 0.4s ease-out; }
+  @media (prefers-reduced-motion: reduce) { .jb-pulse { animation: none; } .chart-area, .chart-line { transition: none; } }
   .login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
   .login-title { font-size: 19px; margin-bottom: 3px; }
   .login-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 20px; }
@@ -356,6 +367,16 @@ const templatesSource = `
               <path id="chart-area" class="chart-area"></path>
               <path id="chart-line" class="chart-line"></path>
             </svg>
+            <div class="chart-key" id="chart-key" style="display:none">
+              <div class="chart-key-item">
+                <span class="chart-key-swatch"></span>
+                <span class="chart-key-label" id="chart-key-name">Requests/s</span>
+                <span class="chart-key-val chart-key-val--now" id="chart-key-now">–</span>
+              </div>
+              <div class="chart-key-item"><span class="chart-key-label">min</span><span class="chart-key-val" id="chart-key-min">–</span></div>
+              <div class="chart-key-item"><span class="chart-key-label">avg</span><span class="chart-key-val" id="chart-key-avg">–</span></div>
+              <div class="chart-key-item"><span class="chart-key-label">max</span><span class="chart-key-val" id="chart-key-max">–</span></div>
+            </div>
             <div class="chart-empty" id="chart-empty">No traffic reported yet — this fills in once a data plane instance proxies at least one request and reports it back (every 10s by default).</div>
           </div>
         </section>
@@ -509,7 +530,31 @@ const templatesSource = `
             var doc = new DOMParser().parseFromString(html, 'text/html');
             var newContent = doc.querySelector('.content');
             var curContent = document.querySelector('.content');
-            if (newContent && curContent) curContent.innerHTML = newContent.innerHTML;
+            if (newContent && curContent) {
+              // The Traffic chart card has its OWN smooth 3s updater, so the
+              // 5s whole-page refresh must NOT tear it out and rebuild it —
+              // that wholesale swap is what made the chart flash. Rebuild the
+              // content by adopting the incoming nodes, but keep the LIVE
+              // chart card node in place (skip its incoming replacement) so
+              // its JS-managed SVG/animation state is never destroyed.
+              var liveChart = curContent.querySelector('#traffic-chart');
+              var liveCard = liveChart ? liveChart.closest('.card') : null;
+              // Detach the live chart card so clearing curContent won't drop it.
+              if (liveCard && liveCard.parentNode) liveCard.parentNode.removeChild(liveCard);
+              curContent.innerHTML = '';
+              var incoming = Array.prototype.slice.call(newContent.childNodes);
+              incoming.forEach(function (node) {
+                var imported = document.importNode(node, true);
+                // Where the refreshed HTML has the chart card, drop in the
+                // live one we saved instead of the fresh (empty) copy.
+                if (liveCard && imported.nodeType === 1 && imported.querySelector &&
+                    imported.querySelector('#traffic-chart')) {
+                  curContent.appendChild(liveCard);
+                } else {
+                  curContent.appendChild(imported);
+                }
+              });
+            }
             var note = document.getElementById('refresh-note');
             if (note) note.textContent = 'Auto-refreshing every 5s · last updated ' + new Date().toLocaleTimeString();
           })
@@ -530,6 +575,41 @@ const templatesSource = `
     (function () {
       var currentMetric = 'req';
       var latestPoints = [];
+      var lastSampleKey = null;   // detect a genuinely new sample to blink on
+
+      var METRIC_LABELS = { req: 'Requests/s', active: 'Active connections', err: '5xx errors/s', avgMs: 'Avg latency (ms)' };
+
+      function fmt(v) {
+        if (v == null || isNaN(v)) return '–';
+        if (v >= 100) return Math.round(v).toString();
+        if (v >= 10) return v.toFixed(1);
+        return v.toFixed(2).replace(/\.?0+$/, '');
+      }
+
+      function updateKey(vals) {
+        var keyEl = document.getElementById('chart-key');
+        if (!keyEl) return;
+        var nameEl = document.getElementById('chart-key-name');
+        if (nameEl) nameEl.textContent = METRIC_LABELS[currentMetric] || currentMetric;
+        if (!vals.length) { keyEl.style.display = 'none'; return; }
+        keyEl.style.display = 'flex';
+        var now = vals[vals.length - 1];
+        var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
+        var avg = vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+        var set = function (id, v) { var el = document.getElementById(id); if (el) el.textContent = fmt(v); };
+        set('chart-key-now', now); set('chart-key-min', min); set('chart-key-avg', avg); set('chart-key-max', max);
+      }
+
+      function pulse() {
+        // Subtle: briefly scale just the live value, so a fresh sample is
+        // noticeable without flashing the whole panel. The SVG line/area
+        // tween to their new shape via a CSS transition on the path.
+        var el = document.getElementById('chart-key-now');
+        if (!el) return;
+        el.classList.remove('jb-pulse');
+        void el.offsetWidth;         // reflow so re-adding the class restarts the animation
+        el.classList.add('jb-pulse');
+      }
 
       function draw() {
         var svg = document.getElementById('traffic-chart');
@@ -539,6 +619,7 @@ const templatesSource = `
         if (!svg || !areaEl || !lineEl) return;
 
         var vals = latestPoints.map(function (p) { return p[currentMetric] || 0; });
+        updateKey(vals);
         if (vals.length < 2) {
           areaEl.setAttribute('d', '');
           lineEl.setAttribute('d', '');
@@ -566,7 +647,14 @@ const templatesSource = `
           .then(function (res) { return res.ok ? res.json() : []; })
           .then(function (points) {
             latestPoints = points || [];
+            // Blink only when the newest sample actually changed, not on every poll.
+            var sampleKey = latestPoints.length
+              ? JSON.stringify(latestPoints[latestPoints.length - 1])
+              : null;
+            var isNew = sampleKey !== null && sampleKey !== lastSampleKey;
+            lastSampleKey = sampleKey;
             draw();
+            if (isNew) pulse();
             var meta = document.getElementById('chart-meta');
             if (meta) meta.textContent = 'aggregated across every group this control plane manages · last 10 min · updated ' + new Date().toLocaleTimeString();
           })
@@ -673,8 +761,7 @@ const templatesSource = `
         <div class="right"><span class="clock-pill" id="clock"></span></div>
       </header>
       <div class="content">
-        <p class="routes-note">A request matching no rule below (or an empty table) falls back to each data plane instance's own <code>-group</code> flag. Host and path-prefix fields may be left blank to match anything; the methods field accepts a comma-separated list (e.g. <code>GET, POST</code>) and is left blank to match any method. <strong>Strip prefix</strong> removes a literal path prefix before proxying (e.g. <code>/api</code>). <strong>Req headers</strong> take one <code>Name: value</code> per line to set a request header, or <code>-Name</code> to remove one. <strong>Match (header/query)</strong> adds extra conditions that must ALL hold on top of host/path/method — one per line: <code>header:X-Api-Version: 2</code> (header equals a value), <code>header:X-Debug</code> (header present, any value), <code>query:canary=true</code> (query param equals), or <code>query:debug</code> (query param present). <strong>Auth</strong> optionally requires callers to authenticate: <code>apikey:KEY1,KEY2</code> (in the <code>X-API-Key</code> header) or <code>jwt:hmac:SECRET</code> (a Bearer JWT validated against an HMAC secret; append <code>:issuer:audience</code> to require those claims). Leave blank for an open route.</p>
-        <form method="post" action="/routes" id="routes-form">
+        <p class="routes-note">A request matching no rule below (or an empty table) falls back to each data plane instance's own <code>-group</code> flag. Host and path-prefix fields may be left blank to match anything; the methods field accepts a comma-separated list (e.g. <code>GET, POST</code>) and is left blank to match any method. <strong>Strip prefix</strong> removes a literal path prefix before proxying (e.g. <code>/api</code>). <strong>Req headers</strong> take one <code>Name: value</code> per line to set a request header, or <code>-Name</code> to remove one. <strong>Match (header/query)</strong> adds extra conditions that must ALL hold on top of host/path/method — one per line: <code>header:X-Api-Version: 2</code> (header equals a value), <code>header:X-Debug</code> (header present, any value), <code>query:canary=true</code> (query param equals), or <code>query:debug</code> (query param present). <strong>Auth</strong> optionally requires callers to authenticate: <code>apikey:KEY1,KEY2</code> (in the <code>X-API-Key</code> header) or <code>jwt:hmac:SECRET</code> (a Bearer JWT validated against an HMAC secret; append <code>:issuer:audience</code> to require those claims). Leave blank for an open route. <strong>Redirect</strong> answers a matched request directly with an HTTP redirect instead of proxying it: <code>/new-path</code> or <code>https://example.com/new 301</code> (a trailing 3xx status is optional; default 302). <strong>IP ACL</strong> allows or denies a route by client CIDR, evaluated at the edge (fail-closed): <code>allow 10.0.0.0/8 192.168.1.5</code> (only those clients) or <code>deny 203.0.113.0/24</code> (everyone except those). Leave blank for no IP restriction.</p>        <form method="post" action="/routes" id="routes-form">
           <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
           <section class="card">
             <table class="table routes-table">
@@ -690,6 +777,8 @@ const templatesSource = `
                 <th class="col-headers">Req headers</th>
                 <th class="col-match">Match (header/query)</th>
                 <th class="col-auth">Auth</th>
+                <th class="col-redirect">Redirect</th>
+                <th class="col-ipacl">IP ACL</th>
                 <th class="col-del">Remove</th>
               </tr>
               <tbody id="routes-body">
@@ -714,6 +803,8 @@ const templatesSource = `
                   <td><textarea name="req_headers" rows="2" placeholder="X-From: edge&#10;-X-Debug">{{.ReqHeaders}}</textarea></td>
                   <td><textarea name="match" rows="2" placeholder="header:X-Api-Version: 2&#10;query:canary=true">{{.Match}}</textarea></td>
                   <td><input type="text" name="auth" value="{{.Auth}}" placeholder="apikey:KEY or jwt:hmac:SECRET"></td>
+                  <td><input type="text" name="redirect" value="{{.Redirect}}" placeholder="/new or https://host 301"></td>
+                  <td><input type="text" name="ip_acl" value="{{.IPACL}}" placeholder="allow 10.0.0.0/8"></td>
                   <td class="col-del">
                     <input type="hidden" name="order" value="{{.Order}}">
                     <input type="hidden" name="action" value="keep">
@@ -825,6 +916,20 @@ const templatesSource = `
         authInput.placeholder = 'apikey:KEY or jwt:hmac:SECRET';
         authTd.appendChild(authInput);
         tr.appendChild(authTd);
+
+        var redirectTd = document.createElement('td');
+        var redirectInput = document.createElement('input');
+        redirectInput.type = 'text'; redirectInput.name = 'redirect';
+        redirectInput.placeholder = '/new or https://host 301';
+        redirectTd.appendChild(redirectInput);
+        tr.appendChild(redirectTd);
+
+        var ipAclTd = document.createElement('td');
+        var ipAclInput = document.createElement('input');
+        ipAclInput.type = 'text'; ipAclInput.name = 'ip_acl';
+        ipAclInput.placeholder = 'allow 10.0.0.0/8';
+        ipAclTd.appendChild(ipAclInput);
+        tr.appendChild(ipAclTd);
 
         var delTd = document.createElement('td');
         delTd.className = 'col-del';
