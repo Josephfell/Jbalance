@@ -8,7 +8,7 @@ import (
 
 func TestRouteTable_ResolvesToDefaultGroupWhenEmpty(t *testing.T) {
 	rt := NewRouteTable("web-tier")
-	if got := rt.Resolve("acme.io", "/anything", "GET"); got != "web-tier" {
+	if got := rt.Resolve("acme.io", "/anything", "GET", nil, nil); got != "web-tier" {
 		t.Errorf("expected empty table to resolve to the default group, got %q", got)
 	}
 }
@@ -23,7 +23,7 @@ func TestRouteTable_FirstMatchWins(t *testing.T) {
 		},
 	})
 
-	if got := rt.Resolve("", "/api/checkout/session", "POST"); got != "api-tier" {
+	if got := rt.Resolve("", "/api/checkout/session", "POST", nil, nil); got != "api-tier" {
 		t.Errorf("expected the first matching rule to win regardless of specificity, got %q", got)
 	}
 }
@@ -38,13 +38,13 @@ func TestRouteTable_HostAndMethodMatching(t *testing.T) {
 		},
 	})
 
-	if got := rt.Resolve("api.acme.io", "/orders", "POST"); got != "api-write-tier" {
+	if got := rt.Resolve("api.acme.io", "/orders", "POST", nil, nil); got != "api-write-tier" {
 		t.Errorf("expected POST to api.acme.io to match the method-restricted rule, got %q", got)
 	}
-	if got := rt.Resolve("api.acme.io", "/orders", "GET"); got != "api-tier" {
+	if got := rt.Resolve("api.acme.io", "/orders", "GET", nil, nil); got != "api-tier" {
 		t.Errorf("expected GET to api.acme.io to fall through to the general rule, got %q", got)
 	}
-	if got := rt.Resolve("other.acme.io", "/orders", "POST"); got != "web-tier" {
+	if got := rt.Resolve("other.acme.io", "/orders", "POST", nil, nil); got != "web-tier" {
 		t.Errorf("expected a non-matching host to fall back to the default group, got %q", got)
 	}
 }
@@ -54,7 +54,7 @@ func TestRouteTable_IgnoresStaleVersions(t *testing.T) {
 	rt.Update(&pb.RouteTable{Version: 5, Routes: []*pb.Route{{PathPrefix: "/", TargetGroup: "current-tier"}}})
 	rt.Update(&pb.RouteTable{Version: 3, Routes: []*pb.Route{{PathPrefix: "/", TargetGroup: "stale-tier"}}})
 
-	if got := rt.Resolve("", "/", "GET"); got != "current-tier" {
+	if got := rt.Resolve("", "/", "GET", nil, nil); got != "current-tier" {
 		t.Errorf("expected a stale update to be ignored, got %q", got)
 	}
 	if rt.Version() != 5 {

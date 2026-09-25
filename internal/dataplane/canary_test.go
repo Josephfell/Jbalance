@@ -24,7 +24,7 @@ func TestRouteTable_SplitDistributesByWeight(t *testing.T) {
 	counts := map[string]int{}
 	const n = 20000
 	for i := 0; i < n; i++ {
-		counts[rt.Resolve("", "/anything", "GET")]++
+		counts[rt.Resolve("", "/anything", "GET", nil, nil)]++
 	}
 
 	if counts["stable"]+counts["canary"] != n {
@@ -47,7 +47,7 @@ func TestRouteTable_SingleSplitTargetIsDeterministic(t *testing.T) {
 		},
 	})
 	for i := 0; i < 100; i++ {
-		if got := rt.Resolve("", "/", "GET"); got != "only" {
+		if got := rt.Resolve("", "/", "GET", nil, nil); got != "only" {
 			t.Fatalf("single-target split resolved to %q, want only", got)
 		}
 	}
@@ -59,7 +59,7 @@ func TestRouteTable_TargetGroupUsedWhenNoSplit(t *testing.T) {
 		Version: 1,
 		Routes:  []*pb.Route{{PathPrefix: "/api/", TargetGroup: "api-tier"}},
 	})
-	if got := rt.Resolve("", "/api/x", "GET"); got != "api-tier" {
+	if got := rt.Resolve("", "/api/x", "GET", nil, nil); got != "api-tier" {
 		t.Errorf("expected target_group api-tier, got %q", got)
 	}
 }

@@ -383,6 +383,7 @@ type routeRow struct {
 	StripPrefix string
 	ReqHeaders  string
 	Auth        string
+	Match       string
 }
 
 func routesToRows(routes []controlplane.Route) []routeRow {
@@ -400,6 +401,7 @@ func routesToRows(routes []controlplane.Route) []routeRow {
 			StripPrefix: strip,
 			ReqHeaders:  reqHdrs,
 			Auth:        formatAuth(r.Auth),
+			Match:       formatMatch(r.HeaderMatches, r.QueryMatches),
 		}
 	}
 	return rows
@@ -467,6 +469,7 @@ func (s *Server) handleRoutesSubmit(w http.ResponseWriter, r *http.Request) {
 	stripPrefixes := r.Form["strip_prefix"]
 	reqHeaders := r.Form["req_headers"]
 	auths := r.Form["auth"]
+	matches := r.Form["match"]
 
 	n := len(hosts)
 	type indexed struct {
@@ -483,17 +486,20 @@ func (s *Server) handleRoutesSubmit(w http.ResponseWriter, r *http.Request) {
 			continue // a row with no target group is meaningless — silently dropped rather than saved as broken config
 		}
 		order, _ := strconv.Atoi(valueAt(orders, i))
+		headerMatches, queryMatches := parseMatch(valueAt(matches, i))
 		kept = append(kept, indexed{
 			order: order,
 			route: controlplane.Route{
-				Host:        valueAt(hosts, i),
-				PathPrefix:  valueAt(pathPrefixes, i),
-				Methods:     splitMethods(valueAt(methodsList, i)),
-				TargetGroup: targetGroup,
-				Split:       parseSplit(valueAt(splits, i)),
-				Name:        valueAt(names, i),
-				Rewrite:     parseRewrite(valueAt(stripPrefixes, i), valueAt(reqHeaders, i)),
-				Auth:        parseAuth(valueAt(auths, i)),
+				Host:          valueAt(hosts, i),
+				PathPrefix:    valueAt(pathPrefixes, i),
+				Methods:       splitMethods(valueAt(methodsList, i)),
+				TargetGroup:   targetGroup,
+				Split:         parseSplit(valueAt(splits, i)),
+				Name:          valueAt(names, i),
+				Rewrite:       parseRewrite(valueAt(stripPrefixes, i), valueAt(reqHeaders, i)),
+				Auth:          parseAuth(valueAt(auths, i)),
+				HeaderMatches: headerMatches,
+				QueryMatches:  queryMatches,
 			},
 		})
 	}
@@ -730,6 +736,77 @@ func formatAuth(a *controlplane.RouteAuth) string {
 	default:
 		return ""
 	}
+}
+
+// parseMatch parses the routes editor's header/query match field into
+// controlplane HeaderMatch/QueryMatch conditions. One condition per line:
+//
+//	header:Name: value    -> request header Name must equal value
+//	header:Name           -> request header Name must be present (any value)
+//	query:name=value      -> query parameter name must equal value
+//	query:name            -> query parameter name must be present
+//
+// A bare "Name: value" / "Name" line (no prefix) is treated as a header
+// condition, since header matching is the more common case. Blank lines
+// and unparseable lines are skipped. Returns (nil, nil) for empty input.
+func parseMatch(s string) ([]controlplane.HeaderMatch, []controlplane.QueryMatch) {
+	var headers []controlplane.HeaderMatch
+	var queries []controlplane.QueryMatch
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(line, "query:"); ok {
+			name, val := splitNameValue(rest, "=")
+			if name != "" {
+				queries = append(queries, controlplane.QueryMatch{Name: name, Value: val})
+			}
+			continue
+		}
+		rest := line
+		if r, ok := strings.CutPrefix(line, "header:"); ok {
+			rest = r
+		}
+		name, val := splitNameValue(rest, ":")
+		if name != "" {
+			headers = append(headers, controlplane.HeaderMatch{Name: name, Value: val})
+		}
+	}
+	return headers, queries
+}
+
+// splitNameValue splits "name<sep>value" into a trimmed name and value.
+// When sep is absent, the whole string is the name and the value is empty
+// (a presence-only condition).
+func splitNameValue(s, sep string) (name, value string) {
+	if i := strings.Index(s, sep); i >= 0 {
+		return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+len(sep):])
+	}
+	return strings.TrimSpace(s), ""
+}
+
+// formatMatch renders HeaderMatch/QueryMatch conditions back into the
+// editor field (one "header:Name: value" or "query:name=value" per line)
+// so a saved match round-trips. Presence-only conditions omit the value
+// and its separator.
+func formatMatch(headers []controlplane.HeaderMatch, queries []controlplane.QueryMatch) string {
+	var lines []string
+	for _, h := range headers {
+		if h.Value == "" {
+			lines = append(lines, "header:"+h.Name)
+		} else {
+			lines = append(lines, "header:"+h.Name+": "+h.Value)
+		}
+	}
+	for _, q := range queries {
+		if q.Value == "" {
+			lines = append(lines, "query:"+q.Name)
+		} else {
+			lines = append(lines, "query:"+q.Name+"="+q.Value)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // metricsChartPoint is the small JSON shape the dashboard's chart JS

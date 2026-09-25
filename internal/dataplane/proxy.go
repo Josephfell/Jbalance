@@ -213,7 +213,7 @@ func NewProxy(routes *RouteTable, groups *GroupManager, metrics *Metrics, cfg Pr
 // attempt's response back so a retry can still succeed cleanly.
 func (p *Proxy) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		group, rewrite, auth := p.routes.resolveMatch(r.Host, r.URL.Path, r.Method)
+		group, rewrite, auth := p.routes.resolveMatch(r.Host, r.URL.Path, r.Method, r.Header, r.URL.Query())
 
 		// Edge authentication (per-route): reject unauthenticated requests
 		// with 401 before any backend is selected. Open routes pass through.

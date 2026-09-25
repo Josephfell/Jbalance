@@ -313,15 +313,31 @@ func (s *Server) publishRoutes() {
 				ExpectedAudience: r.Auth.ExpectedAudience,
 			}
 		}
+		var headerMatches []*pb.HeaderMatch
+		for _, hm := range r.HeaderMatches {
+			if hm.Name == "" {
+				continue
+			}
+			headerMatches = append(headerMatches, &pb.HeaderMatch{Name: hm.Name, Value: hm.Value})
+		}
+		var queryMatches []*pb.QueryMatch
+		for _, qm := range r.QueryMatches {
+			if qm.Name == "" {
+				continue
+			}
+			queryMatches = append(queryMatches, &pb.QueryMatch{Name: qm.Name, Value: qm.Value})
+		}
 		table.Routes = append(table.Routes, &pb.Route{
-			Host:        r.Host,
-			PathPrefix:  r.PathPrefix,
-			Methods:     r.Methods,
-			TargetGroup: r.TargetGroup,
-			Name:        r.Name,
-			Split:       split,
-			Rewrite:     rewrite,
-			Auth:        auth,
+			Host:          r.Host,
+			PathPrefix:    r.PathPrefix,
+			Methods:       r.Methods,
+			TargetGroup:   r.TargetGroup,
+			Name:          r.Name,
+			Split:         split,
+			Rewrite:       rewrite,
+			Auth:          auth,
+			HeaderMatches: headerMatches,
+			QueryMatches:  queryMatches,
 		})
 	}
 

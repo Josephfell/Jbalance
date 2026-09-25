@@ -26,7 +26,7 @@ func TestResolveRouteReturnsRewrite(t *testing.T) {
 		},
 	})
 
-	group, rw := rt.ResolveRoute("", "/api/v1/orders", "GET")
+	group, rw := rt.ResolveRoute("", "/api/v1/orders", "GET", nil, nil)
 	if group != "api-tier" {
 		t.Fatalf("group = %q, want api-tier", group)
 	}
@@ -35,7 +35,7 @@ func TestResolveRouteReturnsRewrite(t *testing.T) {
 	}
 
 	// A non-matching request gets the default group and a zero rewrite.
-	g2, rw2 := rt.ResolveRoute("", "/other", "GET")
+	g2, rw2 := rt.ResolveRoute("", "/other", "GET", nil, nil)
 	if g2 != "default" || !rw2.isZero() {
 		t.Fatalf("non-match = (%q, zero=%v), want (default, zero=true)", g2, rw2.isZero())
 	}

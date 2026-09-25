@@ -3,6 +3,7 @@ package dataplane
 import (
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,18 @@ type route struct {
 	// auth, when enabled, requires the matched request to authenticate
 	// (API key or JWT) before it is proxied. Zero value = open route.
 	auth routeAuth
+	// headerMatches and queryMatches are extra request conditions that
+	// must ALL hold (AND) on top of host/path/method. Nil = no condition.
+	headerMatches []kvMatch
+	queryMatches  []kvMatch
+}
+
+// kvMatch is one name/value condition on a request header or query
+// parameter. An empty value matches on mere presence of the name;
+// otherwise the value must be present and equal.
+type kvMatch struct {
+	name  string
+	value string
 }
 
 // routeRewrite is the data plane's local form of pb.RouteRewrite.
@@ -56,7 +69,7 @@ type routeTarget struct {
 	weight int32
 }
 
-func (r route) matches(host, path, method string) bool {
+func (r route) matches(host, path, method string, header http.Header, query url.Values) bool {
 	if r.host != "" && r.host != "*" && !strings.EqualFold(r.host, host) {
 		return false
 	}
@@ -75,7 +88,58 @@ func (r route) matches(host, path, method string) bool {
 			return false
 		}
 	}
+	for _, hm := range r.headerMatches {
+		if !headerConditionMet(header, hm) {
+			return false
+		}
+	}
+	for _, qm := range r.queryMatches {
+		if !queryConditionMet(query, qm) {
+			return false
+		}
+	}
 	return true
+}
+
+// headerConditionMet reports whether header satisfies hm: the header must
+// be present, and when hm.value is non-empty the value must equal it.
+// Header-name lookup is case-insensitive (http.Header canonicalises);
+// the value comparison is case-sensitive.
+func headerConditionMet(header http.Header, hm kvMatch) bool {
+	if header == nil {
+		return false
+	}
+	if hm.value == "" {
+		return len(header.Values(hm.name)) > 0
+	}
+	for _, v := range header.Values(hm.name) {
+		if v == hm.value {
+			return true
+		}
+	}
+	return false
+}
+
+// queryConditionMet reports whether query satisfies qm: the parameter
+// must be present, and when qm.value is non-empty a value must equal it.
+// Both name and value are compared case-sensitively.
+func queryConditionMet(query url.Values, qm kvMatch) bool {
+	if query == nil {
+		return false
+	}
+	vals, ok := query[qm.name]
+	if !ok {
+		return false
+	}
+	if qm.value == "" {
+		return true
+	}
+	for _, v := range vals {
+		if v == qm.value {
+			return true
+		}
+	}
+	return false
 }
 
 // RouteTable holds the data plane's current L7 route table and resolves
@@ -134,13 +198,15 @@ func (t *RouteTable) Update(table *pb.RouteTable) {
 			split = append(split, routeTarget{group: tgt.Group, weight: w})
 		}
 		routes = append(routes, route{
-			host:        r.Host,
-			pathPrefix:  r.PathPrefix,
-			methods:     r.Methods,
-			targetGroup: r.TargetGroup,
-			split:       split,
-			rewrite:     rewriteFromProto(r.Rewrite),
-			auth:        authFromProto(r.Auth),
+			host:          r.Host,
+			pathPrefix:    r.PathPrefix,
+			methods:       r.Methods,
+			targetGroup:   r.TargetGroup,
+			split:         split,
+			rewrite:       rewriteFromProto(r.Rewrite),
+			auth:          authFromProto(r.Auth),
+			headerMatches: kvMatchesFromProto(r.HeaderMatches),
+			queryMatches:  queryMatchesFromProto(r.QueryMatches),
 		})
 	}
 	t.routes = routes
@@ -151,36 +217,38 @@ func (t *RouteTable) Update(table *pb.RouteTable) {
 // path, and method should be proxied to: for the first matching rule,
 // either its single target group or — if the rule configures a weighted
 // split — one of the split targets chosen by weight. Falls back to the
-// data plane's default group if no rule matches.
-func (t *RouteTable) Resolve(host, path, method string) string {
-	group, _, _ := t.resolveMatch(host, path, method)
+// data plane's default group if no rule matches. header/query may be nil
+// (rules with no header/query conditions still match).
+func (t *RouteTable) Resolve(host, path, method string, header http.Header, query url.Values) string {
+	group, _, _ := t.resolveMatch(host, path, method, header, query)
 	return group
 }
 
 // ResolveRoute is Resolve plus the matched rule's rewrite. The returned
 // rewrite is the zero value (a no-op) when no rule matched or the matched
 // rule configured no rewrites.
-func (t *RouteTable) ResolveRoute(host, path, method string) (string, routeRewrite) {
-	group, rw, _ := t.resolveMatch(host, path, method)
+func (t *RouteTable) ResolveRoute(host, path, method string, header http.Header, query url.Values) (string, routeRewrite) {
+	group, rw, _ := t.resolveMatch(host, path, method, header, query)
 	return group, rw
 }
 
 // ResolveWithAuth is Resolve plus the matched rule's edge-auth policy. The
 // returned routeAuth is the zero value (open) when no rule matched or the
 // matched rule configured no auth.
-func (t *RouteTable) ResolveWithAuth(host, path, method string) (string, routeAuth) {
-	group, _, auth := t.resolveMatch(host, path, method)
+func (t *RouteTable) ResolveWithAuth(host, path, method string, header http.Header, query url.Values) (string, routeAuth) {
+	group, _, auth := t.resolveMatch(host, path, method, header, query)
 	return group, auth
 }
 
-// resolveMatch resolves host/path/method to a target group plus the
-// matched rule's rewrite and auth policies (both zero when no rule
-// matched). Single matching path shared by all three resolve methods.
-func (t *RouteTable) resolveMatch(host, path, method string) (string, routeRewrite, routeAuth) {
+// resolveMatch resolves host/path/method (plus optional header/query
+// conditions) to a target group plus the matched rule's rewrite and auth
+// policies (both zero when no rule matched). Single matching path shared
+// by all three resolve methods.
+func (t *RouteTable) resolveMatch(host, path, method string, header http.Header, query url.Values) (string, routeRewrite, routeAuth) {
 	t.mu.RLock()
 	var matched *route
 	for i := range t.routes {
-		if t.routes[i].matches(host, path, method) {
+		if t.routes[i].matches(host, path, method, header, query) {
 			matched = &t.routes[i]
 			break
 		}
@@ -199,6 +267,38 @@ func (t *RouteTable) resolveMatch(host, path, method string) (string, routeRewri
 	}
 	t.mu.RUnlock()
 	return group, rw, auth
+}
+
+// kvMatchesFromProto converts pb.HeaderMatch entries into local kvMatch
+// conditions, dropping any with an empty name.
+func kvMatchesFromProto(in []*pb.HeaderMatch) []kvMatch {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]kvMatch, 0, len(in))
+	for _, m := range in {
+		if m == nil || m.Name == "" {
+			continue
+		}
+		out = append(out, kvMatch{name: m.Name, value: m.Value})
+	}
+	return out
+}
+
+// queryMatchesFromProto converts pb.QueryMatch entries into local kvMatch
+// conditions, dropping any with an empty name.
+func queryMatchesFromProto(in []*pb.QueryMatch) []kvMatch {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]kvMatch, 0, len(in))
+	for _, m := range in {
+		if m == nil || m.Name == "" {
+			continue
+		}
+		out = append(out, kvMatch{name: m.Name, value: m.Value})
+	}
+	return out
 }
 
 // rewriteFromProto converts a pb.RouteRewrite (possibly nil) into the

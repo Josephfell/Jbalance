@@ -673,7 +673,7 @@ const templatesSource = `
         <div class="right"><span class="clock-pill" id="clock"></span></div>
       </header>
       <div class="content">
-        <p class="routes-note">A request matching no rule below (or an empty table) falls back to each data plane instance's own <code>-group</code> flag. Host and path-prefix fields may be left blank to match anything; the methods field accepts a comma-separated list (e.g. <code>GET, POST</code>) and is left blank to match any method. <strong>Strip prefix</strong> removes a literal path prefix before proxying (e.g. <code>/api</code>). <strong>Req headers</strong> take one <code>Name: value</code> per line to set a request header, or <code>-Name</code> to remove one. <strong>Auth</strong> optionally requires callers to authenticate: <code>apikey:KEY1,KEY2</code> (in the <code>X-API-Key</code> header) or <code>jwt:hmac:SECRET</code> (a Bearer JWT validated against an HMAC secret; append <code>:issuer:audience</code> to require those claims). Leave blank for an open route.</p>
+        <p class="routes-note">A request matching no rule below (or an empty table) falls back to each data plane instance's own <code>-group</code> flag. Host and path-prefix fields may be left blank to match anything; the methods field accepts a comma-separated list (e.g. <code>GET, POST</code>) and is left blank to match any method. <strong>Strip prefix</strong> removes a literal path prefix before proxying (e.g. <code>/api</code>). <strong>Req headers</strong> take one <code>Name: value</code> per line to set a request header, or <code>-Name</code> to remove one. <strong>Match (header/query)</strong> adds extra conditions that must ALL hold on top of host/path/method — one per line: <code>header:X-Api-Version: 2</code> (header equals a value), <code>header:X-Debug</code> (header present, any value), <code>query:canary=true</code> (query param equals), or <code>query:debug</code> (query param present). <strong>Auth</strong> optionally requires callers to authenticate: <code>apikey:KEY1,KEY2</code> (in the <code>X-API-Key</code> header) or <code>jwt:hmac:SECRET</code> (a Bearer JWT validated against an HMAC secret; append <code>:issuer:audience</code> to require those claims). Leave blank for an open route.</p>
         <form method="post" action="/routes" id="routes-form">
           <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
           <section class="card">
@@ -688,6 +688,7 @@ const templatesSource = `
                 <th class="col-split">Split (canary)</th>
                 <th class="col-strip">Strip prefix</th>
                 <th class="col-headers">Req headers</th>
+                <th class="col-match">Match (header/query)</th>
                 <th class="col-auth">Auth</th>
                 <th class="col-del">Remove</th>
               </tr>
@@ -711,6 +712,7 @@ const templatesSource = `
                   <td><input type="text" name="split" value="{{.Split}}" placeholder="e.g. stable:90, canary:10"></td>
                   <td><input type="text" name="strip_prefix" value="{{.StripPrefix}}" placeholder="/api"></td>
                   <td><textarea name="req_headers" rows="2" placeholder="X-From: edge&#10;-X-Debug">{{.ReqHeaders}}</textarea></td>
+                  <td><textarea name="match" rows="2" placeholder="header:X-Api-Version: 2&#10;query:canary=true">{{.Match}}</textarea></td>
                   <td><input type="text" name="auth" value="{{.Auth}}" placeholder="apikey:KEY or jwt:hmac:SECRET"></td>
                   <td class="col-del">
                     <input type="hidden" name="order" value="{{.Order}}">
@@ -809,6 +811,13 @@ const templatesSource = `
         hdrInput.placeholder = 'X-From: edge\n-X-Debug';
         hdrTd.appendChild(hdrInput);
         tr.appendChild(hdrTd);
+
+        var matchTd = document.createElement('td');
+        var matchInput = document.createElement('textarea');
+        matchInput.name = 'match'; matchInput.rows = 2;
+        matchInput.placeholder = 'header:X-Api-Version: 2\nquery:canary=true';
+        matchTd.appendChild(matchInput);
+        tr.appendChild(matchTd);
 
         var authTd = document.createElement('td');
         var authInput = document.createElement('input');
